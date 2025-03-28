@@ -2,17 +2,17 @@ from __future__ import annotations
 
 from fractions import Fraction
 from itertools import chain
-from typing import Any, Literal, overload, cast
+from typing import Any, Literal, cast, overload
 
 from vstools import (
-    ColorRange, CustomRuntimeError, FieldBased, GenericVSFunction, InvalidColorFamilyError,
-    KwargsNotNone, KwargsT, PlanesT, VSFunction, core, depth, disallow_variable_format,
-    disallow_variable_resolution, fallback, get_prop, normalize_planes, normalize_seq, scale_delta, vs
+    ColorRange, ConstantFormatVideoNode, CustomRuntimeError, FieldBased, GenericVSFunction, InvalidColorFamilyError,
+    KwargsNotNone, KwargsT, PlanesT, VSFunction, check_variable, core, depth, fallback, get_prop, normalize_planes,
+    normalize_seq, scale_delta, vs
 )
 
 from .enums import (
-    FlowMode, MaskMode, MotionMode, MVDirection, MVToolsPlugin, PenaltyMode, RFilterMode, SADMode,
-    SearchMode, SharpMode, SmoothMode
+    FlowMode, MaskMode, MotionMode, MVDirection, MVToolsPlugin, PenaltyMode, RFilterMode, SADMode, SearchMode,
+    SharpMode, SmoothMode
 )
 from .motion import MotionVectors
 from .utils import normalize_thscd, planes_to_mvtools
@@ -64,11 +64,9 @@ class MVTools:
     vectors: MotionVectors
     """Motion vectors analyzed and used for all operations."""
 
-    clip: vs.VideoNode
+    clip: ConstantFormatVideoNode
     """Clip to process."""
 
-    @disallow_variable_format
-    @disallow_variable_resolution
     def __init__(
         self, clip: vs.VideoNode, search_clip: vs.VideoNode | GenericVSFunction | None = None,
         vectors: MotionVectors | None = None,
@@ -126,6 +124,8 @@ class MVTools:
         :param mask_args:                Arguments passed to every :py:attr:`MVToolsPlugin.Mask` calls.
         :param sc_detection_args:        Arguments passed to every :py:attr:`MVToolsPlugin.SCDetection` calls.
         """
+
+        assert check_variable(clip, self.__class__)
 
         InvalidColorFamilyError.check(clip, (vs.YUV, vs.GRAY), self.__class__)
 
@@ -386,7 +386,9 @@ class MVTools:
         vectors = fallback(vectors, self.vectors)
 
         if not vectors.has_vectors:
-            raise CustomRuntimeError(f'You must run {self.analyze} before recalculating motion vectors!', self.recalculate)
+            raise CustomRuntimeError(
+                f'You must run {self.analyze} before recalculating motion vectors!', self.recalculate
+            )
 
         blksize, blksizev = normalize_seq(blksize, 2)
         overlap, overlapv = normalize_seq(overlap, 2)
@@ -422,17 +424,6 @@ class MVTools:
         thsad: int | None = None, thsad2: int | None = None,
         time: float | None = None, thscd: int | tuple[int | None, int | None] | None = None,
         interleave: Literal[True] = True, temporal_func: None = None
-    ) -> vs.VideoNode:
-        ...
-
-    @overload
-    def compensate(
-        self, clip: vs.VideoNode | None = None, super: vs.VideoNode | None = None,
-        vectors: MotionVectors | None = None, direction: MVDirection = MVDirection.BOTH,
-        tr: int | None = None, scbehavior: bool | None = None,
-        thsad: int | None = None, thsad2: int | None = None,
-        time: float | None = None, thscd: int | tuple[int | None, int | None] | None = None,
-        interleave: Literal[True] = True, temporal_func: VSFunction = ...
     ) -> tuple[vs.VideoNode, tuple[int, int]]:
         ...
 
@@ -443,7 +434,18 @@ class MVTools:
         tr: int | None = None, scbehavior: bool | None = None,
         thsad: int | None = None, thsad2: int | None = None,
         time: float | None = None, thscd: int | tuple[int | None, int | None] | None = None,
-        interleave: Literal[False] = False
+        interleave: Literal[True] = True, temporal_func: VSFunction = ...
+    ) -> vs.VideoNode:
+        ...
+
+    @overload
+    def compensate(
+        self, clip: vs.VideoNode | None = None, super: vs.VideoNode | None = None,
+        vectors: MotionVectors | None = None, direction: MVDirection = MVDirection.BOTH,
+        tr: int | None = None, scbehavior: bool | None = None,
+        thsad: int | None = None, thsad2: int | None = None,
+        time: float | None = None, thscd: int | tuple[int | None, int | None] | None = None,
+        interleave: Literal[False] = False, temporal_func: None = None
     ) -> tuple[list[vs.VideoNode], list[vs.VideoNode]]:
         ...
 
@@ -530,16 +532,6 @@ class MVTools:
         tr: int | None = None, time: float | None = None, mode: FlowMode | None = None,
         thscd: int | tuple[int | None, int | None] | None = None,
         interleave: Literal[True] = True, temporal_func: None = None
-    ) -> vs.VideoNode:
-        ...
-
-    @overload
-    def flow(
-        self, clip: vs.VideoNode | None = None, super: vs.VideoNode | None = None,
-        vectors: MotionVectors | None = None, direction: MVDirection = MVDirection.BOTH,
-        tr: int | None = None, time: float | None = None, mode: FlowMode | None = None,
-        thscd: int | tuple[int | None, int | None] | None = None,
-        interleave: Literal[True] = True, temporal_func: VSFunction = ...
     ) -> tuple[vs.VideoNode, tuple[int, int]]:
         ...
 
@@ -549,7 +541,17 @@ class MVTools:
         vectors: MotionVectors | None = None, direction: MVDirection = MVDirection.BOTH,
         tr: int | None = None, time: float | None = None, mode: FlowMode | None = None,
         thscd: int | tuple[int | None, int | None] | None = None,
-        interleave: Literal[False] = False
+        interleave: Literal[True] = True, temporal_func: VSFunction = ...
+    ) -> vs.VideoNode:
+        ...
+
+    @overload
+    def flow(
+        self, clip: vs.VideoNode | None = None, super: vs.VideoNode | None = None,
+        vectors: MotionVectors | None = None, direction: MVDirection = MVDirection.BOTH,
+        tr: int | None = None, time: float | None = None, mode: FlowMode | None = None,
+        thscd: int | tuple[int | None, int | None] | None = None,
+        interleave: Literal[False] = False, temporal_func: None = None
     ) -> tuple[list[vs.VideoNode], list[vs.VideoNode]]:
         ...
 
@@ -703,13 +705,44 @@ class MVTools:
             )
 
         return output
+    
+    @overload
+    def flow_interpolate(
+        self, clip: vs.VideoNode | None = None, super: vs.VideoNode | None = None,
+        vectors: MotionVectors | None = None, time: float | None = None,
+        ml: float | None = None, blend: bool | None = None,
+        thscd: int | tuple[int | None, int | None] | None = None,
+        interleave: Literal[True] = ..., multi: int | None = None
+    ) -> vs.VideoNode:
+        ...
+
+    @overload
+    def flow_interpolate(
+        self, clip: vs.VideoNode | None = None, super: vs.VideoNode | None = None,
+        vectors: MotionVectors | None = None, time: float | None = None,
+        ml: float | None = None, blend: bool | None = None,
+        thscd: int | tuple[int | None, int | None] | None = None,
+        interleave: Literal[False] = ..., multi: int | None = None
+    ) -> list[vs.VideoNode]:
+        ...
+
+    @overload
+    def flow_interpolate(
+        self, clip: vs.VideoNode | None = None, super: vs.VideoNode | None = None,
+        vectors: MotionVectors | None = None, time: float | None = None,
+        ml: float | None = None, blend: bool | None = None,
+        thscd: int | tuple[int | None, int | None] | None = None,
+        interleave: bool = ..., multi: int | None = None
+    ) -> vs.VideoNode | list[vs.VideoNode]:
+        ...
 
     def flow_interpolate(
         self, clip: vs.VideoNode | None = None, super: vs.VideoNode | None = None,
         vectors: MotionVectors | None = None, time: float | None = None,
         ml: float | None = None, blend: bool | None = None,
-        thscd: int | tuple[int | None, int | None] | None = None, interleave: bool = True
-    ) -> vs.VideoNode:
+        thscd: int | tuple[int | None, int | None] | None = None,
+        interleave: bool = True, multi: int | None = None
+    ) -> vs.VideoNode | list[vs.VideoNode]:
         """
         Motion interpolation function that creates an intermediate frame between two frames.
 
@@ -724,6 +757,7 @@ class MVTools:
                               If None, uses the vectors from this instance.
         :param time:          Time position between frames as a percentage (0.0-100.0).
                               Controls the interpolation position between frames.
+                              Does nothing if multi is specified.
         :param ml:            Mask scale parameter that controls occlusion mask strength.
                               Higher values produce weaker occlusion masks.
                               Used in MakeVectorOcclusionMaskTime for modes 3-5.
@@ -734,9 +768,10 @@ class MVTools:
                               First value is the block change threshold between frames.
                               Second value is the number of changed blocks needed for a scene change.
         :param interleave:    Whether to interleave the interpolated frames with the source clip.
+        :param multi:         Framerate multiplier.
 
-        :return:              Motion interpolated clip with frames created
-                              at the specified time position between input frames.
+        :return:              List of the motion interpolated frames if interleave=False else
+                              a motion interpolated clip.
         """
 
         clip = fallback(clip, self.clip)
@@ -750,10 +785,29 @@ class MVTools:
             time=time, ml=ml, blend=blend, thscd1=thscd1, thscd2=thscd2
         )
 
-        interpolated = self.mvtools.FlowInter(clip, super_clip, vect_b, vect_f, **flow_interpolate_args)
+        interpolated = list[vs.VideoNode]()
+
+        if multi:
+            if multi < 2:
+                raise CustomRuntimeError(
+                    'Invalid framerate multiplier specified!', self.flow_interpolate, f'{multi} < 2'
+                )
+
+            flow_interpolate_args.pop('time', None)
+
+            for pos in range(1, multi):
+                time = pos * 100 / multi
+
+                interpolated.append(
+                    self.mvtools.FlowInter(clip, super_clip, vect_b, vect_f, time=time, **flow_interpolate_args)
+                )
+        else:
+            interpolated.append(self.mvtools.FlowInter(clip, super_clip, vect_b, vect_f, **flow_interpolate_args))
 
         if interleave:
-            interpolated = core.std.Interleave([clip, interpolated])
+            interpolated.insert(0, clip)
+
+            return core.std.Interleave(interpolated)
 
         return interpolated
 
@@ -1045,8 +1099,6 @@ class MVTools:
 
         clip = fallback(clip, self.clip)
 
-        vectors = fallback(vectors, self.vectors)
-
         vect = self.get_vector(vectors, direction=direction, delta=delta)
 
         return clip.manipmv.ShowVect(vect, scenechange)
@@ -1078,7 +1130,7 @@ class MVTools:
             analysis_props = dict[str, Any]()
 
             for prop in props_list:
-                analysis_props[prop] = get_prop(vect, prop, int | list)  # type: ignore
+                analysis_props[prop] = get_prop(vect, prop, (int, list))
 
             vectors.analysis_data = analysis_props
 

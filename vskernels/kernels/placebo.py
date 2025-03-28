@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from math import ceil
-from typing import Any, Callable
+from typing import Any, Callable, ClassVar
 
 from jetpytools import inject_kwargs_params
 from vstools import core, fallback, inject_self, vs
 
 from ..types import LeftShift, TopShift
-from .complex import LinearScaler
+from .complex import ComplexScaler
 
 __all__ = [
     'Placebo',
@@ -21,7 +21,7 @@ __all__ = [
 ]
 
 
-class Placebo(LinearScaler):
+class Placebo(ComplexScaler):
     """
     Abstract Placebo scaler.
 
@@ -30,7 +30,7 @@ class Placebo(LinearScaler):
     * vs-placebo <https://github.com/sgt0/vs-placebo>`_
     """
 
-    _kernel: str
+    _kernel: ClassVar[str]
     """Name of the placebo kernel"""
 
     # Kernel settings
@@ -87,7 +87,7 @@ class Placebo(LinearScaler):
         ) | kwargs
 
     @inject_self.cached.property
-    def kernel_radius(self) -> int:  # type: ignore
+    def kernel_radius(self) -> int:
         from .bicubic import Bicubic
 
         if self.taps:

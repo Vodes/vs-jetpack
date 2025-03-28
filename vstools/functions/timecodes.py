@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, ClassVar, Iterable, NamedTuple, TypeVar, overload
+from typing import Any, ClassVar, Iterable, Literal, NamedTuple, TypeVar, overload
 
 import vapoursynth as vs
 
@@ -14,6 +14,7 @@ from typing_extensions import Self
 
 from ..enums import Matrix, SceneChangeMode
 from ..exceptions import FramesLengthError, InvalidTimecodeVersionError
+from ..types import VideoNodeT
 from .file import PackageStorage
 from .render import clip_async_render
 
@@ -254,7 +255,7 @@ class Timecodes(list[Timecode]):
             Timecode(i, f.numerator, f.denominator) for i, f in enumerate(norm_timecodes)
         )
 
-    def assume_vfr(self, clip: vs.VideoNode, func: FuncExceptT | None = None) -> vs.VideoNode:
+    def assume_vfr(self, clip: VideoNodeT, func: FuncExceptT | None = None) -> VideoNodeT:
         """
         Force the given clip to be assumed to be vfr by other applications.
 
@@ -270,11 +271,11 @@ class Timecodes(list[Timecode]):
 
         major_time, minor_fps = self.accumulate_norm_timecodes(self)
 
-        assumed_clip = clip.std.AssumeFPS(None, major_time.numerator, major_time.denominator)
+        assumed_clip = vs.core.std.AssumeFPS(clip, None, major_time.numerator, major_time.denominator)
 
         for other_fps, fps_ranges in minor_fps.items():
             assumed_clip = replace_ranges(
-                assumed_clip, clip.std.AssumeFPS(None, other_fps.numerator, other_fps.denominator),
+                assumed_clip, vs.core.std.AssumeFPS(clip, None, other_fps.numerator, other_fps.denominator),
                 fps_ranges, mismatch=True
             )
 
@@ -382,7 +383,7 @@ class Keyframes(list[int]):
 
     @classmethod
     def from_clip(
-        cls: type[KeyframesBoundT], clip: vs.VideoNode, mode: SceneChangeMode | int = WWXD, height: int | None = 360,
+        cls: type[KeyframesBoundT], clip: vs.VideoNode, mode: SceneChangeMode | int = WWXD, height: int | Literal[False] = 360,
         **kwargs: Any
     ) -> KeyframesBoundT:
 
@@ -396,7 +397,7 @@ class Keyframes(list[int]):
 
     @inject_self.with_args(_dummy=True)
     def to_clip(
-        self, clip: vs.VideoNode, *, mode: SceneChangeMode | int = WWXD, height: int | None = 360,
+        self, clip: vs.VideoNode, *, mode: SceneChangeMode | int = WWXD, height: int | Literal[False] = 360,
         prop_key: str = next(iter(SceneChangeMode.SCXVID.prop_keys)), scene_idx_prop: bool = False
     ) -> vs.VideoNode:
         from ..utils import replace_ranges
@@ -491,13 +492,17 @@ class Keyframes(list[int]):
             ]
         elif format == Keyframes.XVID:
             lut_self = set(self)
-            out_text = [
-                *(['# XviD 2pass stat file', '',] if header else []),
-                *(
-                    (lut_self.remove(i) or 'i') if i in lut_self else 'b'  # type: ignore
-                    for i in range(max(self))
-                )
-            ]
+            out_text = list[str]()
+
+            if header:
+                out_text.extend(['# XviD 2pass stat file', ''])
+
+            for i in range(max(self)):
+                if i in lut_self:
+                    out_text.append('i')
+                    lut_self.remove(i)
+                else:
+                    out_text.append('b')
 
         out_path.unlink(True)
         out_path.touch()
@@ -581,30 +586,38 @@ class LWIndex:
 
         sinfomatch = LWIndex.Regex.streaminfo.match(data[indexstart - 2])
 
+        assert sinfomatch
+
         timebase_num, timebase_den = [
-            int(i) for i in sinfomatch.group("TimeBase").split("/")  # type: ignore
+            int(i) for i in sinfomatch.group("TimeBase").split("/")
         ]
 
         streaminfo = LWIndex.StreamInfo(
-            int(sinfomatch.group("Codec")),  # type: ignore
+            int(sinfomatch.group("Codec")),
             Fraction(timebase_num, timebase_den),
-            int(sinfomatch.group("Width")),  # type: ignore
-            int(sinfomatch.group("Height")),  # type: ignore
-            sinfomatch.group("Format"),  # type: ignore
-            Matrix(int(sinfomatch.group("ColorSpace"))),  # type: ignore
+            int(sinfomatch.group("Width")),
+            int(sinfomatch.group("Height")),
+            sinfomatch.group("Format"),
+            Matrix(int(sinfomatch.group("ColorSpace"))),
         )
 
-        frames = sorted([
-            LWIndex.Frame(*(
-                int(x) for x in (
-                    match[0].group(key) for match in [  # type: ignore
-                        (LWIndex.Regex.frame_first.match(data[i]), ['Index', 'POS', 'PTS', 'DTS', 'EDI']),
-                        (LWIndex.Regex.frame_second.match(data[i + 1]), ['Key', 'Pic', 'POC', 'Repeat', 'Field'])
-                    ] for key in match[1]
+        frames = list[LWIndex.Frame]()
+
+        for i in range(indexstart, indexend, 2):
+            match_first = LWIndex.Regex.frame_first.match(data[i])
+            match_second = LWIndex.Regex.frame_second.match(data[i + 1])
+
+            for match, keys in [
+                (match_first, ['Index', 'POS', 'PTS', 'DTS', 'EDI']),
+                (match_second, ['Key', 'Pic', 'POC', 'Repeat', 'Field'])
+            ]:
+                assert match
+
+                frames.append(
+                    LWIndex.Frame(*(int(match.group(x)) for x in keys))
                 )
-            ))
-            for i in range(indexstart, indexend, 2)
-        ], key=lambda x: x.pts)
+
+        frames = sorted(frames, key=lambda x: x.pts)
 
         keyframes = Keyframes(i for i, f in enumerate(frames) if f.key)
 

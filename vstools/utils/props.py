@@ -1,18 +1,27 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable, MutableMapping, Literal, TypeVar, overload
+import sys
+
+from typing import TYPE_CHECKING, Any, Callable, Literal, MutableMapping, Sequence, TypeVar
+from typing import cast as typing_cast
+from typing import overload
 
 import vapoursynth as vs
 
-from jetpytools import MISSING, FileWasNotFoundError, FuncExceptT, MissingT, SPath, SPathLike, SupportsString
+from jetpytools import (
+    MISSING, FileWasNotFoundError, FuncExceptT, MissingT, SPath, SPathLike, SupportsString,
+    normalize_seq
+)
 
 from ..enums import PropEnum
 from ..exceptions import FramePropError
-from ..types import BoundVSMapValue, HoldsPropValueT
+from ..types import BoundVSMapValue, ConstantFormatVideoNode, HoldsPropValueT
+from ..types.generic import BoundVSMapValue_0, BoundVSMapValue_1
 from .cache import NodesPropsCache
 
 __all__ = [
     'get_prop',
+    'get_props',
     'merge_clip_props',
     'get_clip_filepath'
 ]
@@ -26,36 +35,73 @@ class _get_prop:
 
     @overload
     def __call__(
-        self, obj: HoldsPropValueT, key: SupportsString | PropEnum, t: type[BoundVSMapValue],
-        cast: None = None, default: MissingT = ..., func: FuncExceptT | None = None
+        self, obj: HoldsPropValueT, key: SupportsString | PropEnum,
+        t: type[BoundVSMapValue],
+        *, func: FuncExceptT | None = None
     ) -> BoundVSMapValue:
         ...
 
     @overload
     def __call__(
-        self, obj: HoldsPropValueT, key: SupportsString | PropEnum, t: type[BoundVSMapValue],
-        cast: type[CT], default: MissingT = ..., func: FuncExceptT | None = None
+        self, obj: HoldsPropValueT, key: SupportsString | PropEnum,
+        t: tuple[type[BoundVSMapValue], type[BoundVSMapValue_0]],
+        *, func: FuncExceptT | None = None
+    ) -> BoundVSMapValue | BoundVSMapValue_0:
+        ...
+
+    @overload
+    def __call__(
+        self, obj: HoldsPropValueT, key: SupportsString | PropEnum,
+        t: tuple[type[BoundVSMapValue], type[BoundVSMapValue_0], type[BoundVSMapValue_1]],
+        *, func: FuncExceptT | None = None
+    ) -> BoundVSMapValue | BoundVSMapValue_0 | BoundVSMapValue_1:
+        ...
+
+    @overload
+    def __call__(
+        self, obj: HoldsPropValueT, key: SupportsString | PropEnum,
+        t: tuple[type[BoundVSMapValue], ...],
+        *, func: FuncExceptT | None = None
+    ) -> Any:
+        ...
+
+    @overload
+    def __call__(
+        self, obj: HoldsPropValueT, key: SupportsString | PropEnum,
+        t: type[BoundVSMapValue] | tuple[type[BoundVSMapValue], ...],
+        cast: type[CT] | Callable[[BoundVSMapValue], CT], *, func: FuncExceptT | None = None
     ) -> CT:
         ...
 
     @overload
     def __call__(
-        self, obj: HoldsPropValueT, key: SupportsString | PropEnum, t: type[BoundVSMapValue],
-        cast: None = None, default: DT | MissingT = ...,
+        self, obj: HoldsPropValueT, key: SupportsString | PropEnum,
+        t: type[BoundVSMapValue] | tuple[type[BoundVSMapValue], ...],
+        *, default: DT | MissingT = ...,
         func: FuncExceptT | None = None
     ) -> BoundVSMapValue | DT:
         ...
 
     @overload
     def __call__(
-        self, obj: HoldsPropValueT, key: SupportsString | PropEnum, t: type[BoundVSMapValue],
+        self, obj: HoldsPropValueT, key: SupportsString | PropEnum,
+        t: type[BoundVSMapValue] | tuple[type[BoundVSMapValue], ...],
         cast: type[CT] | Callable[[BoundVSMapValue], CT], default: DT | MissingT = ...,
         func: FuncExceptT | None = None
     ) -> CT | DT:
         ...
 
+    @overload
     def __call__(
         self, obj: HoldsPropValueT, key: SupportsString | PropEnum, t: type[BoundVSMapValue],
+        cast: type[CT] | Callable[[BoundVSMapValue], CT] | None, default: DT | MissingT,
+        func: FuncExceptT | None = None
+    ) -> BoundVSMapValue | CT | DT:
+        ...
+
+    def __call__(
+        self, obj: HoldsPropValueT, key: SupportsString | PropEnum,
+        t: type[BoundVSMapValue] | tuple[type[BoundVSMapValue], ...],
         cast: type[CT] | Callable[[BoundVSMapValue], CT] | None = None, default: DT | MissingT = MISSING,
         func: FuncExceptT | None = None
     ) -> BoundVSMapValue | CT | DT:
@@ -67,11 +113,13 @@ class _get_prop:
         :param t:                   type of prop.
         :param cast:                Cast value to this type, if specified.
         :param default:             Fallback value.
+        :param func:                Function returned for custom error handling.
+                                    This should only be set by VS package developers.
 
         :return:                    frame.prop[key].
 
         :raises FramePropError:     ``key`` is not found in props.
-        :raises FramePropError:     Returns a prop of the wrong type.
+        :raises FramePropError:     ``key`` is of the wrong type.
         """
         props: MutableMapping[str, Any]
 
@@ -108,7 +156,9 @@ class _get_prop:
             prop = props[key]
 
             if not isinstance(prop, t):
-                if issubclass(t, str) and isinstance(prop, bytes):
+                ts: tuple[type[BoundVSMapValue], ...] = (t, ) if not isinstance(t, tuple) else t
+
+                if all(issubclass(ty, str) for ty in ts) and isinstance(prop, bytes):
                     return prop.decode('utf-8')  # type: ignore[return-value]
                 raise TypeError
 
@@ -136,6 +186,16 @@ class _get_prop:
 
 
 get_prop = _get_prop()
+
+
+@overload
+def merge_clip_props(*clips: ConstantFormatVideoNode, main_idx: int = 0) -> ConstantFormatVideoNode:
+    ...
+
+
+@overload
+def merge_clip_props(*clips: vs.VideoNode, main_idx: int = 0) -> vs.VideoNode:
+    ...
 
 
 def merge_clip_props(*clips: vs.VideoNode, main_idx: int = 0) -> vs.VideoNode:
@@ -228,3 +288,119 @@ def get_clip_filepath(
         return fallback_path
 
     raise FileWasNotFoundError('File not found!', func, spath.absolute())
+
+
+@overload
+def get_props(
+    obj: HoldsPropValueT,
+    keys: Sequence[SupportsString | PropEnum],
+    t: type[BoundVSMapValue],
+    *,
+    func: FuncExceptT | None = None
+) -> dict[str, BoundVSMapValue]:
+    ...
+
+
+@overload
+def get_props(
+    obj: HoldsPropValueT,
+    keys: Sequence[SupportsString | PropEnum],
+    t: type[BoundVSMapValue],
+    cast: type[CT] | Callable[[BoundVSMapValue], CT],
+    *,
+    func: FuncExceptT | None = None
+) -> dict[str, CT]:
+    ...
+
+
+@overload
+def get_props(
+    obj: HoldsPropValueT,
+    keys: Sequence[SupportsString | PropEnum],
+    t: type[BoundVSMapValue],
+    *,
+    default: DT,
+    func: FuncExceptT | None = None
+) -> dict[str, BoundVSMapValue | DT]:
+    ...
+
+
+@overload
+def get_props(
+    obj: HoldsPropValueT,
+    keys: Sequence[SupportsString | PropEnum],
+    t: type[BoundVSMapValue],
+    cast: type[CT] | Callable[[BoundVSMapValue], CT],
+    default: DT,
+    func: FuncExceptT | None = None
+) -> dict[str, CT | DT]:
+    ...
+
+
+@overload
+def get_props(
+    obj: HoldsPropValueT,
+    keys: Sequence[SupportsString | PropEnum],
+    t: Sequence[type[BoundVSMapValue]],
+    cast: Sequence[type[CT] | Callable[[BoundVSMapValue], CT]] | None = None,
+    default: DT | Sequence[DT] | MissingT = ...,
+    func: FuncExceptT | None = None
+) -> dict[str, Any]:
+    ...
+
+
+def get_props(
+    obj: HoldsPropValueT,
+    keys: Sequence[SupportsString | PropEnum],
+    t: type[BoundVSMapValue] | Sequence[type[BoundVSMapValue]],
+    cast: type[CT] | Callable[[BoundVSMapValue], CT] | Sequence[type[CT] | Callable[[BoundVSMapValue], CT]] | None = None,
+    default: DT | Sequence[DT] | MissingT = MISSING,
+    func: FuncExceptT | None = None
+) -> dict[str, Any]:
+    """
+    Get multiple frame properties from a clip.
+
+    :param obj:                 Clip or frame containing props.
+    :param keys:                List of props to get.
+    :param t:                   Type of prop or list of types of props.
+                                If fewer types are provided than props,
+                                the last type will be used for the remaining props.
+    :param cast:                Cast value to this type, if specified.
+    :param default:             Fallback value. Can be a single value or a list of values.
+                                If a list is provided, it must be the same length as keys.
+    :param func:                Function returned for custom error handling.
+                                This should only be set by VS package developers.
+
+    :return:                    Dictionary mapping property names to their values.
+                                Values will be of type specified by cast if provided,
+                                otherwise of the type(s) specified in ``t``
+                                or a default value if provided.
+    """
+
+    func = func or 'get_props'
+
+    if not keys:
+        return {}
+
+    t = normalize_seq(t, len(keys))
+    ncast = typing_cast(list[type[CT | Callable[[BoundVSMapValue], CT]]], normalize_seq(cast, len(keys)))
+    ndefault = normalize_seq(default, len(keys))
+
+    props = dict[str, Any]()
+    exceptions = list[Exception]()
+
+    for k, t_, cast_, default_ in zip(keys, t, ncast, ndefault):
+        try:
+            prop = get_prop(obj, k, t_, cast_, default_, func)
+        except Exception as e:
+            exceptions.append(e)
+        else:
+            props[str(k)] = prop
+
+    if exceptions:
+        if sys.version_info >= (3, 11):
+            raise ExceptionGroup("Multiple exceptions occurred!", exceptions)  # noqa: F821
+
+        raise Exception(exceptions)
+
+    return props

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Iterable, Sequence, cast
+from typing import Iterable, Sequence
 
 import vapoursynth as vs
 from jetpytools import FuncExceptT, T, cachedproperty, fallback, iterate, kwargs_fallback, normalize_seq, to_arr
@@ -170,13 +170,13 @@ class FunctionUtil(cachedproperty.baseclass, list[int]):
 
             InvalidColorspacePathError.check(self.func, clip)
 
-        return cast(ConstantFormatVideoNode, clip)
+        return clip
 
     @cachedproperty
     def work_clip(self) -> ConstantFormatVideoNode:
         """Get the "work clip" as specified from the input planes."""
 
-        return plane(self.norm_clip, 0) if self.luma_only else self.norm_clip  # type: ignore
+        return plane(self.norm_clip, 0) if self.luma_only else self.norm_clip
 
     @cachedproperty
     def chroma_planes(self) -> list[vs.VideoNode]:
@@ -287,7 +287,7 @@ class FunctionUtil(cachedproperty.baseclass, list[int]):
     def without_planes(self, planes: PlanesT) -> list[int]:
         return self.normalize_planes(sorted(set(self) - {*self.normalize_planes(planes)}))
 
-    def return_clip(self, processed: vs.VideoNode) -> vs.VideoNode:
+    def return_clip(self, processed: vs.VideoNode) -> ConstantFormatVideoNode:
         """
         Merge back the chroma if necessary and convert the processed clip back to the original clip's format.
         If `bitdepth != None`, the bitdepth will also be converted if necessary.
@@ -317,7 +317,7 @@ class FunctionUtil(cachedproperty.baseclass, list[int]):
 
         return processed
 
-    def norm_seq(self, seq: T | Sequence[T], null: T = 0) -> list[T]:  # type: ignore
+    def norm_seq(self, seq: T | Sequence[T], null: T) -> list[T]:
         """
         Normalize a value or sequence to a list mapped to the clip's planes.
         Unprocessed planes will be set to the given "null" value.

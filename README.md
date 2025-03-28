@@ -64,6 +64,7 @@ Note: Not all plugin dependencies are hard dependencies, many are optional.
 - [awarpsharp2](https://github.com/dubhater/vapoursynth-awarpsharp2) / [warpsharpsf](https://github.com/IFeelBloated/warpsharp)
 - [tcanny](https://github.com/HomeOfVapourSynthEvolution/VapourSynth-TCanny)
 - [tedgemask](https://github.com/dubhater/vapoursynth-tedgemask)
+- [hysteresis](https://github.com/sgt0/vapoursynth-hysteresis)
 - [retinex](https://github.com/HomeOfVapourSynthEvolution/VapourSynth-Retinex)
 - [adaptivegrain](https://github.com/Irrational-Encoding-Wizardry/adaptivegrain)
 - [rgvs](https://github.com/vapoursynth/vs-removegrain) / [rgsf](https://github.com/IFeelBloated/RGSF)
@@ -77,3 +78,5 @@ Note: Not all plugin dependencies are hard dependencies, many are optional.
 - [dvdsrc2](https://github.com/jsaowji/dvdsrc2)
 - [ffms2](https://github.com/FFMS/ffms2)
 - [lsmas](https://github.com/HomeOfAviSynthPlusEvolution/L-SMASH-Works)
+- [imwri](https://github.com/vapoursynth/vs-imwri)
+- [carefulsource](https://github.com/wwww-wwww/carefulsource)

@@ -2,17 +2,24 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import exp
-from typing import Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from jetpytools import inject_kwargs_params
+from typing_extensions import Self
+
 from vsexprtools import norm_expr
 from vstools import (
     ConstantFormatVideoNode, CustomRuntimeError, CustomValueError, HoldsVideoFormatT, InvalidTransferError, Matrix,
     MatrixT, Transfer, cachedproperty, depth, get_video_format, inject_self, to_singleton, vs
 )
 
+if TYPE_CHECKING:
+    from .kernels.abstract import BaseScaler
+else:
+    BaseScaler = Any
+
 from .kernels import (
-    Bicubic, BicubicAuto, Catrom, ComplexKernel, CustomComplexKernel, Descaler, Kernel, KernelT, LinearDescaler,
+    Bicubic, BicubicAuto, Catrom, ComplexKernel, CustomComplexKernel, Kernel, KernelT, LinearDescaler,
     Placebo, Point, Resampler, ResamplerT, Scaler
 )
 from .types import Center, LeftShift, Slope, TopShift
@@ -85,9 +92,10 @@ class NoShift(Bicubic, NoShiftBase):
 class NoScaleBase(Scaler):
     @inject_self.cached
     @inject_kwargs_params
-    def scale(  # type: ignore
+    def scale(
         self, clip: vs.VideoNode, width: int | None = None, height: int | None = None,
-        shift: tuple[TopShift, LeftShift] = (0, 0), **kwargs: Any
+        shift: tuple[TopShift, LeftShift] = (0, 0),
+        **kwargs: Any
     ) -> vs.VideoNode:
         try:
             width, height = Scaler._wh_norm(clip, width, height)
@@ -96,7 +104,17 @@ class NoScaleBase(Scaler):
             return clip
 
 
-class NoScale(NoScaleBase, Bicubic):  # type: ignore
+class NoScale(NoScaleBase, Bicubic):
+    if TYPE_CHECKING:
+        @inject_self.cached
+        @inject_kwargs_params
+        def scale(
+            self, clip: vs.VideoNode, width: int | None = None, height: int | None = None,
+            shift: tuple[TopShift, LeftShift] = (0, 0),
+            **kwargs: Any
+        ) -> vs.VideoNode:
+            ...
+
     def __class_getitem__(cls, kernel: KernelT) -> type[Kernel]:
         return cls.from_kernel(kernel)
 
@@ -110,7 +128,7 @@ class NoScale(NoScaleBase, Bicubic):  # type: ignore
         return inner_no_scale
 
 
-abstract_kernels = list[type[Scaler | Descaler | Resampler | Kernel]]([
+abstract_kernels = list[type[BaseScaler]]([
     Kernel, Placebo, ComplexKernel, CustomComplexKernel, LinearDescaler
 ])
 
@@ -156,8 +174,7 @@ class LinearLight:
     class LinearLightProcessing(cachedproperty.baseclass):
         ll: LinearLight
 
-        @cachedproperty
-        def linear(self) -> vs.VideoNode:
+        def get_linear(self) -> vs.VideoNode:
             wclip: vs.VideoNode = self.ll._wclip
 
             if self.ll._wclip.format.color_family is vs.YUV:
@@ -185,13 +202,14 @@ class LinearLight:
 
             return wclip
 
-        @linear.setter  # type: ignore
-        def linear(self, processed: vs.VideoNode) -> None:
+        def set_linear(self, processed: vs.VideoNode) -> None:
             if self.ll._exited:
                 raise CustomRuntimeError(
                     'You can\'t set .linear after going out of the context manager!', func=self.__class__
                 )
             self._linear = processed
+
+        linear = cachedproperty[[Self], vs.VideoNode, Self, vs.VideoNode, ...](get_linear, set_linear)
 
         @cachedproperty
         def out(self) -> vs.VideoNode:
@@ -203,7 +221,7 @@ class LinearLight:
             if not hasattr(self, '_linear'):
                 raise CustomValueError('You need to set .linear before getting .out!', self.__class__)
 
-            processed = self._linear  # type: ignore
+            processed = self._linear
 
             if self.ll.sigmoid:
                 processed = norm_expr(
@@ -248,7 +266,7 @@ class LinearLight:
 
         self._exited = False
 
-        return LinearLight.LinearLightProcessing(self)
+        return self.LinearLightProcessing(self)
 
     def __exit__(self, *args: Any, **kwargs: Any) -> None:
         self._exited = True

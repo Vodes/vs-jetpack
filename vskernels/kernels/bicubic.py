@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from math import sqrt
-from typing import Any
+from typing import Any, overload
 
 from vstools import CustomValueError, inject_self, core, vs
 
@@ -52,10 +52,13 @@ class Bicubic(ZimgComplexKernel):
         return args | dict(filter_param_a=self.b, filter_param_b=self.c)
 
     @inject_self.cached.property
-    def kernel_radius(self) -> int:  # type: ignore[override]
+    def kernel_radius(self) -> int:
         if (self.b, self.c) == (0, 0):
             return 1
         return 2
+
+    def _pretty_string(self, **attrs: Any) -> str:
+        return super()._pretty_string(**dict(b=self.b, c=self.c) | attrs)
 
 
 class BSpline(Bicubic):
@@ -153,6 +156,14 @@ class BicubicAuto(Bicubic):
     Kernel that follows the rule of:
     b + 2c = target
     """
+
+    @overload
+    def __init__(self, b: float = ..., c: None = ..., **kwargs: Any) -> None:
+        ...
+
+    @overload
+    def __init__(self, b: None = ..., c: float = ..., **kwargs: Any) -> None:
+        ...
 
     def __init__(self, b: float | None = None, c: float | None = None, **kwargs: Any) -> None:
         if None not in {b, c}:

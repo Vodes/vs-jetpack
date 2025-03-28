@@ -7,16 +7,16 @@ from dataclasses import dataclass
 from math import floor
 from os import PathLike
 from pathlib import Path
-from typing import Any, BinaryIO, Callable, Literal, overload
+from typing import Any, BinaryIO, Callable, Literal, Union, overload
 
 import vapoursynth as vs
 
 from jetpytools import (
-    CustomRuntimeError, CustomValueError, Sentinel, SentinelT, SPath, SPathLike, T,
-    normalize_list_to_ranges
+    CustomRuntimeError, CustomValueError, Sentinel, SentinelT, SPath, SPathLike, T, normalize_list_to_ranges
 )
 
 from ..exceptions import InvalidColorFamilyError
+from ..types import VideoNodeT
 from .progress import get_render_progress
 
 __all__ = [
@@ -192,7 +192,7 @@ def clip_async_render(
                 rend_clip = blankclip.std.ModifyFrame(clip, _cb)
         else:
             if outfile:
-                raise CustomValueError('You cannot have and output file with multi async request!')
+                raise CustomValueError('You cannot have and output file with multi async request!', clip_async_render)
 
             chunk = floor(clip.num_frames / async_conf.n)
             cl = chunk * async_conf.n
@@ -230,7 +230,7 @@ def clip_async_render(
 
     if outfile is None:
         if y4m:
-            raise CustomValueError('You cannot have y4m=False without any output file!')
+            raise CustomValueError('You cannot have y4m=False without any output file!', clip_async_render)
 
         clip_it = rend_clip.frames(prefetch, backlog, True)
 
@@ -257,7 +257,9 @@ def clip_async_render(
 
         if y4m:
             if rend_clip.format is None:
-                raise CustomValueError('You cannot have y4m=True when rendering a variable resolution clip!')
+                raise CustomValueError(
+                    'You cannot have y4m=True when rendering a variable resolution clip!', clip_async_render
+                )
             else:
                 InvalidColorFamilyError.check(
                     rend_clip, (vs.YUV, vs.GRAY), clip_async_render,
@@ -276,7 +278,10 @@ def clip_async_render(
         try:
             return [result[i] for i in range(clip.num_frames)]
         except KeyError:
-            raise CustomRuntimeError('There was an error with the rendering and one frame request was rejected!')
+            raise CustomRuntimeError(
+                'There was an error with the rendering and one frame request was rejected!',
+                clip_async_render
+            )
 
     return None
 
@@ -291,7 +296,7 @@ def clip_data_gather(
     return list(Sentinel.filter(frames))
 
 
-_operators: dict[str, tuple[Callable[[Any, Any], Any], str]] = {
+_operators: dict[str, tuple[Callable[[Any, Any], bool], str]] = {
     "<": (operator.lt, '<'),
     "<=": (operator.le, '<='),
     "==": (operator.eq, '='),
@@ -303,27 +308,27 @@ _operators: dict[str, tuple[Callable[[Any, Any], Any], str]] = {
 
 @overload
 def prop_compare_cb(
-    src: vs.VideoNode, prop: str, op: str | Callable[[float, float], bool] | None, ref: float | bool,
+    src: VideoNodeT, prop: str, op: str | Callable[[float, float], bool] | None, ref: float | bool,
     return_frame_n: Literal[False] = ...
-) -> tuple[vs.VideoNode, Callable[[int, vs.VideoFrame], bool]]:
+) -> tuple[VideoNodeT, Callable[[int, vs.VideoFrame], bool]]:
     ...
 
 
 @overload
 def prop_compare_cb(
-    src: vs.VideoNode, prop: str, op: str | Callable[[float, float], bool] | None, ref: float | bool,
+    src: VideoNodeT, prop: str, op: str | Callable[[float, float], bool] | None, ref: float | bool,
     return_frame_n: Literal[True] = ...
-) -> tuple[vs.VideoNode, Callable[[int, vs.VideoFrame], int | SentinelT]]:
+) -> tuple[VideoNodeT, Callable[[int, vs.VideoFrame], int | SentinelT]]:
     ...
 
 
 def prop_compare_cb(
-    src: vs.VideoNode, prop: str, op: str | Callable[[float, float], bool] | None, ref: float | bool,
+    src: VideoNodeT, prop: str, op: str | Callable[[float, float], bool] | None, ref: float | bool,
     return_frame_n: bool = False
-) -> (
-    tuple[vs.VideoNode, Callable[[int, vs.VideoFrame], bool]]  # noqa
-    | tuple[vs.VideoNode, Callable[[int, vs.VideoFrame], int | SentinelT]]
-):
+) -> Union[
+     tuple[VideoNodeT, Callable[[int, vs.VideoFrame], bool]],
+     tuple[VideoNodeT, Callable[[int, vs.VideoFrame], int | SentinelT]]
+]:
     bool_check = isinstance(ref, bool)
     one_pix = hasattr(vs.core, 'akarin') and not (callable(op) or ' ' in prop)
     assert (op is None) if bool_check else (op is not None)
@@ -333,26 +338,40 @@ def prop_compare_cb(
 
     callback: Callable[[int, vs.VideoFrame], SentinelT | int]
     if one_pix:
-        src = vs.core.std.BlankClip(
+        clip = vs.core.std.BlankClip(
             None, 1, 1, vs.GRAY8 if bool_check else vs.GRAYS, length=src.num_frames
         ).std.CopyFrameProps(src).akarin.Expr(
             f'x.{prop}' if bool_check else f'x.{prop} {ref} {_operators[op][1]}'  # type: ignore[index]
         )
-        if return_frame_n:
-            # no-fmt
-            callback = lambda n, f: Sentinel.check(n, not not f[0][0, 0])  # noqa
-        else:
-            # no-fmt
-            callback = lambda n, f: not not f[0][0, 0]  # noqa
-    else:
-        _op = _operators[op][0] if isinstance(op, str) else op
+        src = clip  # type: ignore[assignment]
+
+        def _cb_one_px_return_frame_n(n: int, f: vs.VideoFrame) -> int | SentinelT:
+            return Sentinel.check(n, not not f[0][0, 0])
+
+        def _cb_one_px_not_return_frame_n(n: int, f: vs.VideoFrame) -> bool:
+            return not not f[0][0, 0]
 
         if return_frame_n:
-            # no-fmt
-            callback = lambda n, f: Sentinel.check(n, _op(f.props[prop], ref))  # type: ignore  # noqa
+            callback = _cb_one_px_return_frame_n
         else:
-            # no-fmt
-            callback = lambda n, f: _op(f.props[prop], ref)  # type: ignore  # noqa
+            callback = _cb_one_px_not_return_frame_n
+    else:
+        from ..utils import get_prop
+
+        _op = _operators[op][0] if isinstance(op, str) else op
+
+        def _cb_return_frame_n(n: int, f: vs.VideoFrame) -> int | SentinelT:
+            assert _op
+            return Sentinel.check(n, _op(get_prop(f, prop, (float, bool)), ref))
+
+        def _cb_not_return_frame_n(n: int, f: vs.VideoFrame) -> bool:
+            assert _op
+            return _op(get_prop(f, prop, (float, bool)), ref)
+
+        if return_frame_n:
+            callback = _cb_return_frame_n
+        else:
+            callback = _cb_not_return_frame_n
 
     return src, callback
 

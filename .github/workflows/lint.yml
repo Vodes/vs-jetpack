@@ -10,22 +10,26 @@ on:
     paths:
       - '**.py'
 
+permissions:
+  contents: read
+
 jobs:
   lint:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        vs-versions: [66]
+        vs-versions: [67]
         python-version: ['3.12']
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: qoomon/actions--context@v2
+      - uses: qoomon/actions--context@v3
         id: context
-      - uses: tj-actions/branch-names@v8
+      - name: Determine branch name
         id: branch-names
+        run: echo "current_branch=${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}" >> $GITHUB_OUTPUT
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
@@ -61,6 +65,12 @@ jobs:
 
       - name: Running mypy on vsexprtools
         run: uv run mypy vsexprtools
+
+      - name: Running mypy on vsrgtools
+        run: uv run mypy vsrgtools
+
+      - name: Running mypy on vsmasktools
+        run: uv run mypy vsmasktools
 
       - name: Post webhook for failure
         if: failure()

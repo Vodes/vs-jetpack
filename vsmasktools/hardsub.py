@@ -3,20 +3,20 @@ from __future__ import annotations
 from abc import abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Type
+from typing import Any, Mapping, Type
 
 from vsexprtools import ExprOp, ExprToken, expr_func, norm_expr
 from vskernels import Bilinear, Catrom, Point
-from vsrgtools import box_blur
+from vsrgtools import box_blur, median_blur
 from vssource import IMWRI, Indexer
 from vstools import (
-    ColorRange, CustomOverflowError, FileNotExistsError, FilePathType, FrameRangeN, FrameRangesN,
-    Matrix, VSFunction, check_variable, core, depth, fallback, get_lowest_value, get_neutral_value,
-    get_neutral_values, get_peak_value, get_y, iterate, limiter, normalize_ranges, replace_ranges,
-    scale_delta, scale_value, vs, vs_object
+    ColorRange, ConstantFormatVideoNode, CustomOverflowError, FileNotExistsError, FilePathType, FrameRangeN,
+    FrameRangesN, Matrix, VSFunctionNoArgs, check_variable, core, depth, fallback, get_lowest_value, get_neutral_value,
+    get_neutral_values, get_peak_value, get_y, iterate, limiter, normalize_ranges, replace_ranges, scale_delta,
+    scale_value, vs, vs_object
 )
 
-from .abstract import DeferredMask, GeneralMask
+from .abstract import BoundingBox, DeferredMask, GeneralMask
 from .edge import SobelStd
 from .morpho import Morpho
 from .types import GenericMaskT, XxpandMode
@@ -43,43 +43,58 @@ __all__ = [
 class _base_cmaskcar(vs_object):
     clips: list[vs.VideoNode]
 
-    @abstractmethod
-    def frame_ranges(self, clip: vs.VideoNode) -> list[list[tuple[int, int]]]:
-        ...
-
     def __vs_del__(self, core_id: int) -> None:
         self.clips.clear()
 
 
 @dataclass
 class CustomMaskFromClipsAndRanges(GeneralMask, _base_cmaskcar):
-    processing: VSFunction = field(default=core.lazy.std.Binarize, kw_only=True)
+    """Abstract CustomMaskFromClipsAndRanges interface"""
+
+    processing: VSFunctionNoArgs[vs.VideoNode, ConstantFormatVideoNode] = field(
+        default=core.lazy.std.Binarize, kw_only=True
+    )
     idx: Indexer | Type[Indexer] = field(default=IMWRI, kw_only=True)
 
-    def get_mask(self, clip: vs.VideoNode, *args: Any, **kwargs: Any) -> vs.VideoNode:
-        assert check_variable(clip, self.get_mask)
+    def get_mask(self, ref: vs.VideoNode, /, *args: Any, **kwargs: Any) -> ConstantFormatVideoNode:
+        """
+        Get the constructed mask
 
-        mask = clip.std.BlankClip(
-            format=clip.format.replace(color_family=vs.GRAY, subsampling_h=0, subsampling_w=0).id,
+        :param ref:         Reference clip.
+        :param **kwargs:    Keyword arguments passed to `replace_ranges` function.
+        :return:            Constructed mask
+        """
+        assert check_variable(ref, self.get_mask)
+
+        mask = vs.core.std.BlankClip(
+            ref,
+            format=ref.format.replace(color_family=vs.GRAY, subsampling_h=0, subsampling_w=0).id,
             keep=True, color=0
         )
 
-        matrix = Matrix.from_video(clip)
+        matrix = Matrix.from_video(ref)
 
-        for maskclip, mask_ranges in zip(self.clips, self.frame_ranges(clip)):
+        for maskclip, mask_ranges in zip(self.clips, self.frame_ranges(ref)):
             maskclip = Point.resample(
-                maskclip.std.AssumeFPS(clip), mask, matrix,
+                maskclip.std.AssumeFPS(ref), mask, matrix,
                 range_in=ColorRange.FULL, range=ColorRange.FULL
             )
-            maskclip = self.processing(maskclip).std.Loop(mask.num_frames)
+            maskclip = self.processing(maskclip)
+            maskclip = vs.core.std.Loop(maskclip, mask.num_frames)
 
             mask = replace_ranges(mask, maskclip, mask_ranges, **kwargs)
 
         return mask
 
+    @abstractmethod
+    def frame_ranges(self, clip: vs.VideoNode) -> list[list[tuple[int, int]]]:
+        ...
+
 
 @dataclass
 class CustomMaskFromFolder(CustomMaskFromClipsAndRanges):
+    """A helper class for creating a mask clip from a folder of images."""
+
     folder_path: FilePathType
 
     def __post_init__(self) -> None:
@@ -99,7 +114,12 @@ class CustomMaskFromFolder(CustomMaskFromClipsAndRanges):
 
 @dataclass
 class CustomMaskFromRanges(CustomMaskFromClipsAndRanges):
-    ranges: dict[FilePathType, FrameRangeN | FrameRangesN]
+    """
+    A helper class for creating a mask clip from a mapping of file paths
+    and their corresponding frame ranges
+    """
+
+    ranges: Mapping[FilePathType, FrameRangeN | FrameRangesN]
 
     def __post_init__(self) -> None:
         self.clips = [self.idx.source(str(file), bits=-1) for file in self.ranges.keys()]
@@ -109,27 +129,28 @@ class CustomMaskFromRanges(CustomMaskFromClipsAndRanges):
 
 
 class HardsubMask(DeferredMask):
+    """Abstract HardsubMask interface"""
+
     bin_thr: float = 0.75
 
     def get_progressive_dehardsub(
         self, hardsub: vs.VideoNode, ref: vs.VideoNode, partials: list[vs.VideoNode]
-    ) -> tuple[list[vs.VideoNode], list[vs.VideoNode]]:
+    ) -> tuple[list[ConstantFormatVideoNode], list[ConstantFormatVideoNode]]:
         """
         Dehardsub using multiple superior hardsubbed sources and one inferior non-subbed source.
 
-        :param hardsub:  Hardsub master source (eg Wakanim RU dub).
-        :param ref:      Non-subbed reference source (eg CR, Funi, Amazon).
-        :param partials: Sources to use for partial dehardsubbing (eg Waka DE, FR, SC).
+        :param hardsub:     Hardsub master source (eg Wakanim RU dub).
+        :param ref:         Non-subbed reference source (eg CR, Funi, Amazon).
+        :param partials:    Sources to use for partial dehardsubbing (eg Waka DE, FR, SC).
 
-        :return:         Dehardsub stages and masks used for progressive dehardsub.
+        :return:            Dehardsub stages and masks used for progressive dehardsub.
         """
+        assert check_variable(hardsub, self.get_progressive_dehardsub)
 
         masks = [self.get_mask(hardsub, ref)]
         partials_dehardsubbed = [hardsub]
-        dehardsub_masks = []
+        dehardsub_masks = list[ConstantFormatVideoNode]()
         partials = partials + [ref]
-
-        assert masks[-1].format is not None
 
         thr = scale_value(self.bin_thr, 32, masks[-1])
 
@@ -138,7 +159,7 @@ class HardsubMask(DeferredMask):
                 ExprOp.SUB.combine(masks[-1], self.get_mask(p, ref))
             )
             dehardsub_masks.append(
-                iterate(expr_func([masks[-1]], f"x {thr} < 0 x ?"), core.std.Maximum, 4).std.Inflate()
+                iterate(expr_func([masks[-1]], f"x {thr} < 0 x ?"), core.lazy.std.Maximum, 4).std.Inflate()
             )
             partials_dehardsubbed.append(
                 partials_dehardsubbed[-1].std.MaskedMerge(p, dehardsub_masks[-1])
@@ -150,7 +171,16 @@ class HardsubMask(DeferredMask):
 
     def apply_dehardsub(
         self, hardsub: vs.VideoNode, ref: vs.VideoNode, partials: list[vs.VideoNode] | None = None
-    ) -> vs.VideoNode:
+    ) -> ConstantFormatVideoNode:
+        """
+        Dehardsub using multiple superior hardsubbed sources and one inferior non-subbed source.
+
+        :param hardsub:     Hardsub master source (eg Wakanim RU dub).
+        :param ref:         Non-subbed reference source (eg CR, Funi, Amazon).
+        :param partials:    Sources to use for partial dehardsubbing (eg Waka DE, FR, SC).
+
+        :return:            Dehardsubbed clip.
+        """
         if partials:
             partials_dehardsubbed, _ = self.get_progressive_dehardsub(hardsub, ref, partials)
             dehardsub = partials_dehardsubbed[-1]
@@ -161,24 +191,50 @@ class HardsubMask(DeferredMask):
 
 
 class HardsubSignFades(HardsubMask):
+    """
+    Helper for hardsub scene filtering, typically used for de-hardsubbing signs during fades or hard-to-catch signs.
+    Originally written by Kageru from Kagefunc:
+    `https://github.com/Irrational-Encoding-Wizardry/kagefunc`
+    """
+
     highpass: float
     expand: int
     edgemask: GenericMaskT
     expand_mode: XxpandMode
 
     def __init__(
-        self, *args: Any, highpass: float = 0.0763, expand: int = 8, edgemask: GenericMaskT = SobelStd,
+        self,
+        ranges: FrameRangeN | FrameRangesN | None = None,
+        bound: BoundingBox | None = None,
+        highpass: float = 0.0763,
+        expand: int = 8,
+        edgemask: GenericMaskT = SobelStd,
         expand_mode: XxpandMode = XxpandMode.RECTANGLE,
-        **kwargs: Any
+        *,
+        blur: bool = False,
+        refframes: int | list[int | None] | None = None
     ) -> None:
+        """
+        :param ranges:          The frame ranges that the mask should be applied to.
+        :param bound:           An optional bounding box that defines the area of the frame where the mask will be applied.
+                                If None, the mask applies to the whole frame.
+        :param highpass:        Highpass threshold. Lower this value if the sign isn't fully de-hardsubbed,
+                                but be cautious as it may also capture more artifacts.
+        :param expand:          Number of expand iterations.
+        :param edgemask:        Edge mask used for finding subtitles.
+        :param expand_mode:     Specifies the XxpandMode used for mask growth
+        :param blur:            Whether to apply a box blur effect to the mask.
+        :param refframes:       A list of reference frames used in building the final mask for each specified range.
+                                Must have the same length as `ranges`.
+        """
         self.highpass = highpass
         self.expand = expand
         self.edgemask = edgemask
         self.expand_mode = expand_mode
 
-        super().__init__(*args, **kwargs)
+        super().__init__(ranges, bound, blur=blur, refframes=refframes)
 
-    def _mask(self, clip: vs.VideoNode, ref: vs.VideoNode, **kwargs: Any) -> vs.VideoNode:
+    def _mask(self, clip: vs.VideoNode, ref: vs.VideoNode, **kwargs: Any) -> ConstantFormatVideoNode:
         clipedge, refedge = (
             box_blur(normalize_mask(self.edgemask, x, **kwargs))
             for x in (clip, ref)
@@ -186,9 +242,9 @@ class HardsubSignFades(HardsubMask):
 
         highpass = scale_delta(self.highpass, 32, clip)
 
-        mask = norm_expr(
-            [clipedge, refedge], f'x y - {highpass} < 0 {ExprToken.RangeMax} ?', func=self.__class__
-        ).std.Median()
+        mask = median_blur(
+            norm_expr([clipedge, refedge], f'x y - {highpass} < 0 {ExprToken.RangeMax} ?', func=self.__class__)
+        )
 
         return max_planes(Morpho.inflate(Morpho.expand(mask, self.expand, mode=self.expand_mode), iterations=4))
 
@@ -196,12 +252,6 @@ class HardsubSignFades(HardsubMask):
 class HardsubSign(HardsubMask):
     """
     Hardsub scenefiltering helper using `Zastin <https://github.com/kgrabs>`_'s hardsub mask.
-
-    :param thr:             Binarization threshold, [0, 1] (Default: 0.06).
-    :param minimum:         std.Minimum iterations (Default: 1).
-    :param expand:          std.Maximum iterations (Default: 8).
-    :param inflate:         std.Inflate iterations (Default: 7).
-    :param expand_mode:     Specifies the XxpandMode used for mask growth (Default: XxpandMode.RECTANGLE).
     """
 
     thr: float
@@ -211,20 +261,41 @@ class HardsubSign(HardsubMask):
     expand_mode: XxpandMode
 
     def __init__(
-        self, *args: Any, thr: float = 0.06, minimum: int = 1, expand: int = 8, inflate: int = 7,
+        self,
+        ranges: FrameRangeN | FrameRangesN | None = None,
+        bound: BoundingBox | None = None,
+        thr: float = 0.06,
+        minimum: int = 1,
+        expand: int = 8,
+        inflate: int = 7,
         expand_mode: XxpandMode = XxpandMode.RECTANGLE,
-        **kwargs: Any
+        *,
+        blur: bool = False,
+        refframes: int | list[int | None] | None = None
     ) -> None:
+        """
+        :param ranges:          The frame ranges that the mask should be applied to.
+        :param bound:           An optional bounding box that defines the area of the frame where the mask will be applied.
+                                If None, the mask applies to the whole frame.
+        :param thr:             Binarization threshold, [0, 1] (Default: 0.06).
+        :param minimum:         std.Minimum iterations (Default: 1).
+        :param expand:          std.Maximum iterations (Default: 8).
+        :param inflate:         std.Inflate iterations (Default: 7).
+        :param expand_mode:     Specifies the XxpandMode used for mask growth (Default: XxpandMode.RECTANGLE).
+        :param blur:            Whether to apply a box blur effect to the mask.
+        :param refframes:       A list of reference frames used in building the final mask for each specified range.
+                                Must have the same length as `ranges`.
+        """
         self.thr = thr
         self.minimum = minimum
         self.expand = expand
         self.inflate = inflate
         self.expand_mode = expand_mode
-        super().__init__(*args, **kwargs)
+        super().__init__(ranges, bound, blur=blur, refframes=refframes)
 
     @limiter
-    def _mask(self, clip: vs.VideoNode, ref: vs.VideoNode, **kwargs: Any) -> vs.VideoNode:
-        assert clip.format
+    def _mask(self, clip: vs.VideoNode, ref: vs.VideoNode, **kwargs: Any) -> ConstantFormatVideoNode:
+        assert check_variable(clip, self._mask)
 
         hsmf = norm_expr([clip, ref], 'x y - abs', func=self.__class__)
         hsmf = Bilinear.resample(hsmf, clip.format.replace(subsampling_w=0, subsampling_h=0))
@@ -240,15 +311,38 @@ class HardsubSign(HardsubMask):
 
 
 class HardsubLine(HardsubMask):
+    """
+    Helper for de-hardsubbing white text with black border subtitles.
+    Originally written by Kageru from Kagefunc:
+    `https://github.com/Irrational-Encoding-Wizardry/kagefunc`
+    """
+
     expand: int | None
 
-    def __init__(self, *args: Any, expand: int | None = None, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        ranges: FrameRangeN | FrameRangesN | None = None,
+        bound: BoundingBox | None = None,
+        expand: int | None = None,
+        *,
+        blur: bool = False,
+        refframes: int | list[int | None] | None = None
+    ) -> None:
+        """
+        :param ranges:          The frame ranges that the mask should be applied to.
+        :param bound:           An optional bounding box that defines the area of the frame where the mask will be applied.
+                                If None, the mask applies to the whole frame.
+        :param expand:          std.Maximum iterations. Default is automatically adjusted based on the width of the clip.
+        :param blur:            Whether to apply a box blur effect to the mask.
+        :param refframes:       A list of reference frames used in building the final mask for each specified range.
+                                Must have the same length as `ranges`.
+        """
         self.expand = expand
 
-        super().__init__(*args, **kwargs)
+        super().__init__(ranges, bound, blur=blur, refframes=refframes)
 
-    def _mask(self, clip: vs.VideoNode, ref: vs.VideoNode, **kwargs: Any) -> vs.VideoNode:
-        assert clip.format
+    def _mask(self, clip: vs.VideoNode, ref: vs.VideoNode, **kwargs: Any) -> ConstantFormatVideoNode:
+        assert check_variable(clip, self.__class__)
 
         expand_n = fallback(self.expand, clip.width // 200)
 
@@ -283,7 +377,7 @@ class HardsubLine(HardsubMask):
         )
         diff = Morpho.maximum(diff, iterations=2, func=self.__class__)
 
-        mask = core.misc.Hysteresis(subedge, diff)
+        mask = subedge.hysteresis.Hysteresis(diff)
         mask = iterate(mask, core.std.Maximum, expand_n)
         mask = box_blur(mask.std.Inflate().std.Inflate())
 
@@ -291,15 +385,39 @@ class HardsubLine(HardsubMask):
 
 
 class HardsubLineFade(HardsubLine):
-    def __init__(self, *args: Any, refframe: float = 0.5, **kwargs: Any) -> None:
+    """
+    A specialized version of HardsubLine with a weight for selecting a frame within the specified frame ranges.
+    """
+
+    ref_float: float
+
+    def __init__(
+        self,
+        ranges: FrameRangeN | FrameRangesN | None = None,
+        bound: BoundingBox | None = None,
+        expand: int | None = None,
+        refframe: float = 0.5,
+        *,
+        blur: bool = False,
+    ) -> None:
+        """
+        :param ranges:          The frame ranges that the mask should be applied to.
+        :param bound:           An optional bounding box that defines the area of the frame where the mask will be applied.
+                                If None, the mask applies to the whole frame.
+        :param expand:          std.Maximum iterations. Default is automatically adjusted based on the width of the clip.
+        :param refframe:        Reference frame weight. Must be between 0 and 1.
+        :param blur:            Whether to apply a box blur effect to the mask.
+        :param refframes:       A list of reference frames used in building the final mask for each specified range.
+                                Must have the same length as `ranges`.
+        """
         if refframe < 0 or refframe > 1:
             raise CustomOverflowError('"refframe" must be between 0 and 1!', self.__class__)
 
         self.ref_float = refframe
 
-        super().__init__(*args, refframes=None, **kwargs)
+        super().__init__(ranges, bound, expand, blur=blur, refframes=None)
 
-    def get_mask(self, clip: vs.VideoNode, ref: vs.VideoNode, **kwargs: Any) -> vs.VideoNode:  # type: ignore
+    def get_mask(self, clip: vs.VideoNode, /, ref: vs.VideoNode, **kwargs: Any) -> ConstantFormatVideoNode:
         self.refframes = [
             r[0] + round((r[1] - r[0]) * self.ref_float)
             for r in normalize_ranges(ref, self.ranges)
@@ -309,39 +427,57 @@ class HardsubLineFade(HardsubLine):
 
 
 class HardsubASS(HardsubMask):
+    """A helper for de-hardsubbing using an ASS subtitle file to generate a hardsub mask."""
+
     filename: str
     fontdir: str | None
-    shift: int | None
 
     def __init__(
-        self, filename: str, *args: Any, fontdir: str | None = None, shift: int | None = None, **kwargs: Any
+        self,
+        filename: FilePathType,
+        ranges: FrameRangeN | FrameRangesN | None = None,
+        bound: BoundingBox | None = None,
+        *,
+        fontdir: str | None = None,
+        blur: bool = False,
+        refframes: int | list[int | None] | None = None
     ) -> None:
-        self.filename = filename
+        """
+        :param filename:        Subtitle file.
+        :param ranges:          The frame ranges that the mask should be applied to.
+        :param bound:           An optional bounding box that defines the area of the frame where the mask will be applied.
+                                If None, the mask applies to the whole frame.
+        :param blur:            Whether to apply a box blur effect to the mask.
+        :param refframes:       A list of reference frames used in building the final mask for each specified range.
+                                Must have the same length as `ranges`.
+        """
+        self.filename = str(filename)
         self.fontdir = fontdir
-        self.shift = shift
-        super().__init__(*args, **kwargs)
+        super().__init__(ranges, bound, blur=blur, refframes=refframes)
 
     @limiter
-    def _mask(self, clip: vs.VideoNode, ref: vs.VideoNode, **kwargs: Any) -> vs.VideoNode:
-        ref = ref[0] * self.shift + ref if self.shift else ref
-        mask = ref.sub.TextFile(self.filename, fontdir=self.fontdir, blend=False).std.PropToClip('_Alpha')
-        mask = mask[self.shift:] if self.shift else mask
+    def _mask(self, clip: vs.VideoNode, ref: vs.VideoNode, **kwargs: Any) -> ConstantFormatVideoNode:
+        mask = core.sub.TextFile(ref, self.filename, fontdir=self.fontdir, blend=False).std.PropToClip('_Alpha')
+
         mask = mask.std.Binarize(1)
-        mask = iterate(mask, core.std.Maximum, 3)
-        mask = iterate(mask, core.std.Inflate, 3)
+
+        mask = iterate(mask, core.lazy.std.Maximum, 3)
+        mask = iterate(mask, core.lazy.std.Inflate, 3)
+
         return mask
 
 
 def bounded_dehardsub(
     hrdsb: vs.VideoNode, ref: vs.VideoNode, signs: list[HardsubMask], partials: list[vs.VideoNode] | None = None
-) -> vs.VideoNode:
+) -> ConstantFormatVideoNode:
+    assert check_variable(hrdsb, bounded_dehardsub)
     for sign in signs:
         hrdsb = sign.apply_dehardsub(hrdsb, ref, partials)
 
     return hrdsb
 
 
-def diff_hardsub_mask(a: vs.VideoNode, b: vs.VideoNode, **kwargs: Any) -> vs.VideoNode:
+def diff_hardsub_mask(a: vs.VideoNode, b: vs.VideoNode, **kwargs: Any) -> ConstantFormatVideoNode:
     assert check_variable(a, diff_hardsub_mask)
     assert check_variable(b, diff_hardsub_mask)
 
@@ -351,12 +487,12 @@ def diff_hardsub_mask(a: vs.VideoNode, b: vs.VideoNode, **kwargs: Any) -> vs.Vid
 
 
 @limiter
-def get_all_sign_masks(hrdsb: vs.VideoNode, ref: vs.VideoNode, signs: list[HardsubMask]) -> vs.VideoNode:
+def get_all_sign_masks(hrdsb: vs.VideoNode, ref: vs.VideoNode, signs: list[HardsubMask]) -> ConstantFormatVideoNode:
     assert check_variable(hrdsb, get_all_sign_masks)
     assert check_variable(ref, get_all_sign_masks)
 
-    mask = ref.std.BlankClip(
-        format=ref.format.replace(color_family=vs.GRAY, subsampling_w=0, subsampling_h=0).id, keep=True
+    mask = core.std.BlankClip(
+        ref, format=ref.format.replace(color_family=vs.GRAY, subsampling_w=0, subsampling_h=0).id, keep=True
     )
 
     for sign in signs:

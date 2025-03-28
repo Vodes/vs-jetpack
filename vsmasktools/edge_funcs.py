@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from typing import Any, Literal, Sequence, cast, overload
+from typing import Any, Literal, Sequence, overload
+
+from jetpytools import CustomIntEnum
 
 from vsexprtools import ExprOp, ExprToken, norm_expr
 from vsrgtools import BlurMatrix, gauss_blur
 from vstools import (
-    ColorRange, ConvMode, CustomEnum, VSFunctionAllArgs, check_variable, depth, get_peak_value,
-    get_y, limiter, plane, scale_delta, scale_mask, scale_value, vs
+    ColorRange, ConstantFormatVideoNode, ConvMode, check_variable, depth, get_peak_value, get_y, limiter, plane,
+    scale_delta, scale_mask, scale_value, vs
 )
 
 from .details import multi_detail_mask
@@ -35,7 +37,7 @@ def ringing_mask(
     thmi: float = 0.315, thma: float = 0.5,
     thlimi: float = 0.195, thlima: float = 0.392,
     credit_mask: GenericMaskT = Prewitt, **kwargs: Any
-) -> vs.VideoNode:
+) -> ConstantFormatVideoNode:
     assert check_variable(clip, ringing_mask)
 
     thmi, thma, thlimi, thlima = (
@@ -62,7 +64,7 @@ def ringing_mask(
     return ExprOp.convolution('x', blur_kernel, premultiply=2, multiply=2, clamp=True)(mask)
 
 
-def luma_mask(clip: vs.VideoNode, thr_lo: float, thr_hi: float, invert: bool = True) -> vs.VideoNode:
+def luma_mask(clip: vs.VideoNode, thr_lo: float, thr_hi: float, invert: bool = True) -> ConstantFormatVideoNode:
     peak = get_peak_value(clip)
 
     lo, hi = (peak, 0) if invert else (0, peak)
@@ -80,7 +82,7 @@ def luma_mask(clip: vs.VideoNode, thr_lo: float, thr_hi: float, invert: bool = T
 
 def luma_credit_mask(
     clip: vs.VideoNode, thr: float = 0.9, edgemask: GenericMaskT = FDoGTCanny, draft: bool = False, **kwargs: Any
-) -> vs.VideoNode:
+) -> ConstantFormatVideoNode:
     y = plane(clip, 0)
 
     edge_mask = normalize_mask(edgemask, y, **kwargs)
@@ -96,7 +98,7 @@ def luma_credit_mask(
 
 def tcanny_retinex(
     clip: vs.VideoNode, thr: float, sigma: Sequence[float] = [50, 200, 350], blur_sigma: float = 1.0
-) -> vs.VideoNode:
+) -> ConstantFormatVideoNode:
     blur = gauss_blur(clip, blur_sigma)
 
     msrcp = retinex(blur, sigma, upper_thr=thr, fast=True, func=tcanny_retinex)
@@ -112,7 +114,7 @@ def limited_linemask(
     detail_sigmas: list[float] = [0.011, 0.013],
     edgemasks: Sequence[GenericMaskT] = [Kirsch],
     **kwargs: Any
-) -> vs.VideoNode:
+) -> ConstantFormatVideoNode:
     clip_y = plane(clip, 0)
 
     return ExprOp.ADD(
@@ -122,19 +124,19 @@ def limited_linemask(
     )
 
 
-class _dre_edgemask(CustomEnum):
+class _dre_edgemask(CustomIntEnum):
     """Edgemask with dynamic range enhancement prefiltering."""
 
-    RETINEX = cast(VSFunctionAllArgs, object())
-    CLAHE = cast(VSFunctionAllArgs, object())
+    RETINEX = 0
+    CLAHE = 1
 
-    def _prefilter(self, clip: vs.VideoNode, **kwargs: Any) -> vs.VideoNode:
-        if self is self.RETINEX:  # type: ignore
+    def _prefilter(self, clip: ConstantFormatVideoNode, **kwargs: Any) -> ConstantFormatVideoNode:
+        if self is self.RETINEX:
             sigmas = kwargs.get('sigmas', [50, 200, 350])
 
             return retinex(clip, sigmas, 0.001, 0.005)
 
-        if self is self.CLAHE:  # type: ignore
+        if self is self.CLAHE:
             limit, tile = kwargs.get('limit', 0.0305), kwargs.get('tile', 5)
 
             return depth(depth(clip, 16).vszip.CLAHE(int(scale_delta(limit, 32, 16)), tile), clip)
@@ -145,17 +147,17 @@ class _dre_edgemask(CustomEnum):
     def __call__(  # type: ignore
         self: Literal[_dre_edgemask.RETINEX], src: vs.VideoNode, tsigma: float = 1, brz: float = 0.122,
         *, sigmas: Sequence[float] = [50, 200, 350]
-    ) -> vs.VideoNode:
+    ) -> ConstantFormatVideoNode:
         ...
 
     @overload
     def __call__(  # type: ignore
         self: Literal[_dre_edgemask.CLAHE], src: vs.VideoNode, tsigma: float = 1, brz: float = 0.122,
         *, limit: float = 0.0305, tile: int = 5
-    ) -> vs.VideoNode:
+    ) -> ConstantFormatVideoNode:
         ...
 
-    def __call__(self, src: vs.VideoNode, tsigma: float = 1, brz: float = 0.122, **kwargs: Any) -> vs.VideoNode:
+    def __call__(self, src: vs.VideoNode, tsigma: float = 1, brz: float = 0.122, **kwargs: Any) -> ConstantFormatVideoNode:
         luma = get_y(src)
 
         dreluma = self._prefilter(luma, **kwargs)

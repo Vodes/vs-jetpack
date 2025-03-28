@@ -1,25 +1,32 @@
 from __future__ import annotations
 
 import inspect
+
 from functools import partial, wraps
-from typing import Any, Callable, TypeGuard, cast, overload
+from typing import Any, Callable, Literal, Sequence, TypeGuard, cast, overload
 
 import vapoursynth as vs
+
 from jetpytools import CustomError, F, FuncExceptT
 
+from ..enums import FieldBased
 from ..exceptions import (
-    FormatsRefClipMismatchError, ResolutionsRefClipMismatchError, VariableFormatError, VariableResolutionError
+    FormatsRefClipMismatchError, ResolutionsRefClipMismatchError, UnsupportedFieldBasedError,
+    VariableFormatError, VariableResolutionError
 )
-from ..types import ConstantFormatVideoNode
+from ..types import ConstantFormatVideoNode, VideoNodeT
 
 __all__ = [
-    'disallow_variable_format',
-    'disallow_variable_resolution',
     'check_ref_clip',
+
+    'check_variable',
     'check_variable_format',
     'check_variable_resolution',
-    'check_variable',
-    'check_correct_subsampling'
+    'check_correct_subsampling',
+    'check_progressive',
+
+    'disallow_variable_format',
+    'disallow_variable_resolution',
 ]
 
 
@@ -32,6 +39,10 @@ def _check_variable(
 
     @wraps(function)
     def _wrapper(*args: Any, **kwargs: Any) -> Any:
+        if only_first:
+            import warnings
+            warnings.warn("Please use the check functions if only_first is True", SyntaxWarning)
+
         for obj in args[:1] if only_first else [*args, *kwargs.values()]:
             if _check(obj):
                 raise error(func=function)
@@ -49,7 +60,7 @@ def _check_variable(
 
 
 @overload
-def disallow_variable_format(*, only_first: bool = False) -> Callable[[F], F]:
+def disallow_variable_format(*, only_first: Literal[False] = ...) -> Callable[[F], F]:
     ...
 
 
@@ -58,7 +69,7 @@ def disallow_variable_format(function: F | None = None, /) -> F:
     ...
 
 
-def disallow_variable_format(function: F | None = None, /, *, only_first: bool = False) -> Callable[[F], F] | F:
+def disallow_variable_format(function: F | None = None, /, *, only_first: Literal[False] = False) -> Callable[[F], F] | F:
     """
     Decorator for disallowing clips with variable formats.
 
@@ -77,7 +88,7 @@ def disallow_variable_format(function: F | None = None, /, *, only_first: bool =
 
 
 @overload
-def disallow_variable_resolution(*, only_first: bool = False) -> Callable[[F], F]:
+def disallow_variable_resolution(*, only_first: Literal[False] = ...) -> Callable[[F], F]:
     ...
 
 
@@ -86,7 +97,7 @@ def disallow_variable_resolution(func: F | None = None, /) -> F:
     ...
 
 
-def disallow_variable_resolution(function: F | None = None, /, *, only_first: bool = False) -> Callable[[F], F] | F:
+def disallow_variable_resolution(function: F | None = None, /, *, only_first: Literal[False] = False) -> Callable[[F], F] | F:
     """
     Decorator for disallowing clips with variable resolutions.
 
@@ -136,20 +147,34 @@ def check_ref_clip(src: vs.VideoNode, ref: vs.VideoNode | None, func: FuncExcept
     return ref
 
 
+@overload
 def check_variable_format(clip: vs.VideoNode, func: FuncExceptT) -> TypeGuard[ConstantFormatVideoNode]:
+    ...
+
+
+@overload
+def check_variable_format(clip: Sequence[vs.VideoNode], func: FuncExceptT) -> TypeGuard[Sequence[ConstantFormatVideoNode]]:
+    ...
+
+
+def check_variable_format(
+    clip: vs.VideoNode | Sequence[vs.VideoNode], func: FuncExceptT
+) -> TypeGuard[ConstantFormatVideoNode] | TypeGuard[Sequence[ConstantFormatVideoNode]]:
     """
     Check for variable format and return an error if found.
 
     :raises VariableFormatError:    The clip is of a variable format.
     """
+    clip = [clip] if isinstance(clip, vs.VideoNode) else clip
 
-    if clip.format is None:
-        raise VariableFormatError(func)
+    for c in clip:
+        if c.format is None:
+            raise VariableFormatError(func)
 
     return True
 
 
-def check_variable_resolution(clip: vs.VideoNode, func: FuncExceptT) -> TypeGuard[vs.VideoNode]:
+def check_variable_resolution(clip: VideoNodeT, func: FuncExceptT) -> TypeGuard[VideoNodeT]:
     """
     Check for variable width or height and return an error if found.
 
@@ -202,3 +227,19 @@ def check_correct_subsampling(
                 'The {subsampling} subsampling is not supported for this resolution!',
                 reason=dict(width=width, height=height)
             )
+
+def check_progressive(clip: VideoNodeT, func: FuncExceptT) -> TypeGuard[VideoNodeT]:
+    """
+    Check if the clip is progressive and return an error if it's not.
+
+    :param clip:                        Clip to check.
+    :param func:                        Function returned for custom error handling.
+                                        This should only be set by VS package developers.
+
+    :raises UnsupportedFieldBasedError: The clip is interlaced.
+    """
+
+    if FieldBased.from_video(clip, func=func).is_inter:
+        raise UnsupportedFieldBasedError("Only progressive video is supported!", func)
+
+    return True

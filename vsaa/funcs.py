@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 from functools import partial
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from vsexprtools import norm_expr
 from vskernels import Bilinear, Box, Catrom, NoScale, Scaler, ScalerT
 from vsmasktools import EdgeDetect, EdgeDetectT, Prewitt, ScharrTCanny
 from vsrgtools import MeanMode, bilateral, box_blur, unsharp_masked
+from vsscale import ArtCNN
 from vstools import (
-    MISSING, CustomRuntimeError, CustomValueError, FormatsMismatchError, FunctionUtil, KwargsT,
-    MissingT, PlanesT, VSFunction, fallback, get_peak_value, get_y, limiter, scale_mask, vs
+    ConstantFormatVideoNode, CustomValueError, FormatsMismatchError, FunctionUtil, KwargsT, PlanesT, VSFunction,
+    VSFunctionNoArgs, check_variable_format, fallback, get_peak_value, get_y, limiter, scale_mask, vs
 )
 
 from .abstract import Antialiaser
@@ -114,7 +114,7 @@ def clamp_aa(
 
     clamped = norm_expr(
         [func.work_clip, ref, weak_aa, strong_aa],
-        'y z - D1! y a - D2! xor x D1@ abs D2@ abs < a z {thr} - z {thr} + clip a ? ?',
+        'y z - D1! y a - D2! D1@ D2@ xor x D1@ abs D2@ abs < a z {thr} - z {thr} + clip a ? ?',
         thr=thr, planes=func.norm_planes, func=func.func
     )
 
@@ -126,180 +126,143 @@ def clamp_aa(
             mask = box_blur(mask.std.Binarize(bin_thr).std.Maximum())
             mask = mask.std.Minimum().std.Deflate()
 
-        clamped = func.work_clip.std.MaskedMerge(clamped, mask, func.norm_planes)  # type: ignore
+        clamped = func.work_clip.std.MaskedMerge(clamped, mask, func.norm_planes)
 
     return func.return_clip(clamped)
 
 
-if TYPE_CHECKING:
-    from vsscale import ArtCNN, ShaderFile
+def based_aa(
+    clip: vs.VideoNode,
+    rfactor: float = 2.0,
+    mask: vs.VideoNode | EdgeDetectT | Literal[False] = Prewitt,
+    mask_thr: int = 60,
+    pscale: float = 0.0,
+    downscaler: ScalerT | None = None,
+    supersampler: ScalerT | Literal[False] = ArtCNN,
+    double_rate: bool = False,
+    antialiaser: Antialiaser | None = None,
+    prefilter: vs.VideoNode | VSFunctionNoArgs[vs.VideoNode, ConstantFormatVideoNode] | Literal[False] = False,
+    postfilter: VSFunctionNoArgs[vs.VideoNode, ConstantFormatVideoNode] | Literal[False] | None = None,
+    show_mask: bool = False, **aa_kwargs: Any
+) -> vs.VideoNode:
+    """
+    Perform based anti-aliasing on a video clip.
 
-    def based_aa(
-        clip: vs.VideoNode, rfactor: float = 2.0,
-        mask: vs.VideoNode | EdgeDetectT | Literal[False] = Prewitt, mask_thr: int = 60, pskip: bool = True,
-        downscaler: ScalerT | None = None,
-        supersampler: ScalerT | ShaderFile | Path | Literal[False] = ArtCNN,
-        double_rate: bool = False,
-        antialiaser: Antialiaser | None = None,
-        prefilter: vs.VideoNode | VSFunction | Literal[False] = False,
-        postfilter: VSFunction | Literal[False] | None = None,
-        show_mask: bool = False, **aa_kwargs: Any
-    ) -> vs.VideoNode:
-        """
-        Perform based anti-aliasing on a video clip.
+    This function works by super- or downsampling the clip and applying an antialiaser to that image.
+    The result is then merged with the original clip using an edge mask, and it's limited
+    to areas where the antialiaser was actually applied.
 
-        This function works by super- or downsampling the clip and applying an antialiaser to that image.
-        The result is then merged with the original clip using an edge mask, and it's limited
-        to areas where the antialiaser was actually applied.
+    Sharp supersamplers will yield better results, so long as they do not introduce too much ringing.
+    For downscalers, you will want to use a neutral kernel.
 
-        Sharp supersamplers will yield better results, so long as they do not introduce too much ringing.
-        For downscalers, you will want to use a neutral kernel.
+    :param clip:                  Clip to process.
+    :param rfactor:               Resize factor for supersampling. Values above 1.0 are recommended.
+                                  Lower values may be useful for particularly extremely aliased content.
+                                  Values closer to 1.0 will perform faster at the cost of precision.
+                                  This value must be greater than 0.0. Default: 2.0.
+    :param mask:                  Edge detection mask or function to generate it. Default: Prewitt.
+    :param mask_thr:              Threshold for edge detection mask.
+                                  Only used if an EdgeDetect class is passed to `mask`. Default: 60.
+    :param pscale:                Scale factor for the supersample-downscale process change.
+    :param downscaler:            Scaler used for downscaling after anti-aliasing. This should ideally be
+                                  a relatively sharp kernel that doesn't introduce too much haloing.
+                                  If None, downscaler will be set to Box if the scale factor is an integer
+                                  (after rounding), and Catrom otherwise.
+                                  If rfactor is below 1.0, the downscaler will be used before antialiasing instead,
+                                  and the supersampler will be used to scale the clip back to its original resolution.
+                                  Default: None.
+    :param supersampler:          Scaler used for supersampling before anti-aliasing. If False, no supersampling
+                                  is performed. If rfactor is below 1.0, the downscaler will be used before
+                                  antialiasing instead, and the supersampler will be used to scale the clip
+                                  back to its original resolution.
+                                  The supersampler should ideally be fairly sharp without
+                                  introducing too much ringing.
+                                  Default: ArtCNN (R8F64).
+    :param double_rate:           Whether to use double-rate antialiasing.
+                                  If True, both fields will be processed separately, which may improve
+                                  anti-aliasing strength at the cost of increased processing time and detail loss.
+                                  Default: False.
+    :param antialiaser:           Antialiaser used for anti-aliasing. If None, EEDI3 will be selected with these default settings:
+                                  (alpha=0.125, beta=0.25, vthresh0=12, vthresh1=24, field=1).
+    :param prefilter:             Prefilter to apply before anti-aliasing.
+                                  Must be a VideoNode, a function that takes a VideoNode and returns a VideoNode,
+                                  or False. Default: False.
+    :param postfilter:            Postfilter to apply after anti-aliasing.
+                                  Must be a function that takes a VideoNode and returns a VideoNode, or None.
+                                  If None, applies a median-filtered bilateral smoother to clean halos
+                                  created during antialiasing. Default: None.
+    :param show_mask:             If True, returns the edge detection mask instead of the processed clip.
+                                  Default: False
 
-        :param clip:            Clip to process.
-        :param rfactor:         Resize factor for supersampling. Values above 1.0 are recommended.
-                                Lower values may be useful for particularly extremely aliased content.
-                                Values closer to 1.0 will perform faster at the cost of precision.
-                                This value must be greater than 0.0. Default: 2.0.
-        :param mask:            Edge detection mask or function to generate it.  Default: Prewitt.
-        :param mask_thr:        Threshold for edge detection mask.
-                                Only used if an EdgeDetect class is passed to `mask`. Default: 60.
-        :param pskip:           Whether to skip processing if antialiaser had no contribution to the pixel's output.
-        :param downscaler:      Scaler used for downscaling after anti-aliasing. This should ideally be
-                                a relatively sharp kernel that doesn't introduce too much haloing.
-                                If None, downscaler will be set to Box if the scale factor is an integer
-                                (after rounding), and Catrom otherwise.
-                                If rfactor is below 1.0, the downscaler will be used before antialiasing instead,
-                                and the supersampler will be used to scale the clip back to its original resolution.
-                                Default: None.
-        :param supersampler:    Scaler used for supersampling before anti-aliasing. If False, no supersampling
-                                is performed. If rfactor is below 1.0, the downscaler will be used before
-                                antialiasing instead, and the supersampler will be used to scale the clip
-                                back to its original resolution.
-                                The supersampler should ideally be fairly sharp without
-                                introducing too much ringing.
-                                Default: ArtCNN (R8F64).
-        :param double_rate:     Whether to use double-rate antialiasing.
-                                If True, both fields will be processed separately, which may improve
-                                anti-aliasing strength at the cost of increased processing time and detail loss.
-                                Default: False.
-        :param antialiaser:     Antialiaser used for anti-aliasing. If None, EEDI3 will be selected with these default settings:
-                                (alpha=0.125, beta=0.25, vthresh0=12, vthresh1=24, field=1).
-        :param prefilter:       Prefilter to apply before anti-aliasing.
-                                Must be a VideoNode, a function that takes a VideoNode and returns a VideoNode,
-                                or False. Default: False.
-        :param postfilter:      Postfilter to apply after anti-aliasing.
-                                Must be a function that takes a VideoNode and returns a VideoNode, or None.
-                                If None, applies a median-filtered bilateral smoother to clean halos
-                                created during antialiasing. Default: None.
-        :param show_mask:       If True, returns the edge detection mask instead of the processed clip.
-                                Default: False
+    :return:                      Anti-aliased clip or edge detection mask if show_mask is True.
 
-        :return:                Anti-aliased clip or edge detection mask if show_mask is True.
+    :raises CustomValueError:     If rfactor is not above 0.0, or invalid prefilter/postfilter is passed.
+    """
 
-        :raises CustomRuntimeError:     If required packages are missing.
-        :raises CustomValueError:       If rfactor is not above 0.0, or invalid prefilter/postfilter is passed.
-        """
+    func = FunctionUtil(clip, based_aa, 0, (vs.YUV, vs.GRAY))
 
-        ...
-else:
-    def based_aa(
-        clip: vs.VideoNode, rfactor: float = 2.0,
-        mask: vs.VideoNode | EdgeDetectT | Literal[False] = Prewitt, mask_thr: int = 60, pskip: bool = True,
-        downscaler: ScalerT | None = None,
-        supersampler: ScalerT | ShaderFile | Path | Literal[False] | MissingT = MISSING,
-        double_rate: bool = False,
-        antialiaser: Antialiaser | None = None,
-        prefilter: vs.VideoNode | VSFunction | Literal[False] = False,
-        postfilter: VSFunction | Literal[False] | None = None,
-        show_mask: bool = False, **aa_kwargs: Any
-    ) -> vs.VideoNode:
+    if rfactor <= 0.0:
+        raise CustomValueError('rfactor must be greater than 0!', based_aa, rfactor)
 
-        func = FunctionUtil(clip, based_aa, 0, (vs.YUV, vs.GRAY))
+    if mask is not False and not isinstance(mask, vs.VideoNode):
+        mask = EdgeDetect.ensure_obj(mask, based_aa).edgemask(func.work_clip, 0)
+        mask = mask.std.Binarize(scale_mask(mask_thr, 8, func.work_clip))
 
-        if supersampler is False:
-            supersampler = downscaler = NoScale
-        else:
-            if supersampler is MISSING:
-                try:
-                    from vsscale import ArtCNN  # noqa: F811
-                except ModuleNotFoundError:
-                    raise CustomRuntimeError(
-                        'You\'re missing the "vsscale" package! Install it with "pip install vsscale".', based_aa
-                    )
-
-                supersampler = ArtCNN.C16F64()
-            elif isinstance(supersampler, (str, Path)):
-                try:
-                    from vsscale import PlaceboShader  # noqa: F811
-                except ModuleNotFoundError:
-                    raise CustomRuntimeError(
-                        'You\'re missing the "vsscale" package! Install it with "pip install vsscale".', based_aa
-                    )
-
-                supersampler = PlaceboShader(supersampler)
-
-        if rfactor <= 0.0:
-            raise CustomValueError('rfactor must be greater than 0!', based_aa, rfactor)
-
-        aaw, aah = [(round(r * rfactor) + 1) & ~1 for r in (func.work_clip.width, func.work_clip.height)]
-
-        if downscaler is None:
-            downscaler = Box if (
-                max(aaw, func.work_clip.width) % min(aaw, func.work_clip.width) == 0
-                and max(aah, func.work_clip.height) % min(aah, func.work_clip.height) == 0
-            ) else Catrom
-
-        if rfactor < 1.0:
-            downscaler, supersampler = supersampler, downscaler
-
-        if not isinstance(mask, vs.VideoNode) and mask is not False:
-            mask = EdgeDetect.ensure_obj(mask, based_aa).edgemask(func.work_clip, 0)
-            mask = mask.std.Binarize(scale_mask(mask_thr, 8, func.work_clip))
-
-            mask = box_blur(mask.std.Maximum())
-            mask = limiter(mask, func=based_aa)
-
+        mask = box_blur(mask.std.Maximum())
+        mask = limiter(mask, func=based_aa)
+        
         if show_mask:
-            if mask is False:
-                raise CustomValueError("Can't show mask when mask is False!", based_aa, mask)
             return mask
 
-        if callable(prefilter):
-            ss_clip = prefilter(func.work_clip)
-        elif isinstance(prefilter, vs.VideoNode):
-            FormatsMismatchError.check(based_aa, func.work_clip, prefilter)
-            ss_clip = prefilter
-        else:
-            ss_clip = func.work_clip
+    if supersampler is False:
+        supersampler = downscaler = NoScale
 
-        supersampler = Scaler.ensure_obj(supersampler, based_aa)
-        downscaler = Scaler.ensure_obj(downscaler, based_aa)
+    aaw, aah = [round(dimension * rfactor) for dimension in (func.work_clip.width, func.work_clip.height)]
 
-        ss = supersampler.scale(ss_clip, aaw, aah)
+    if downscaler is None:
+        downscaler = Box if (
+            max(aaw, func.work_clip.width) % min(aaw, func.work_clip.width) == 0
+            and max(aah, func.work_clip.height) % min(aah, func.work_clip.height) == 0
+        ) else Catrom
 
-        if antialiaser is None:
-            antialiaser = Eedi3(mclip=Bilinear.scale(mask, ss.width, ss.height) if mask else None, sclip_aa=True)
-            aa_kwargs = KwargsT(alpha=0.125, beta=0.25, vthresh0=12, vthresh1=24, field=1) | aa_kwargs
+    supersampler = Scaler.ensure_obj(supersampler, based_aa)
+    downscaler = Scaler.ensure_obj(downscaler, based_aa)
 
-        if double_rate:
-            aa = antialiaser.draa(ss, **aa_kwargs)
-        else:
-            aa = antialiaser.aa(ss, **aa_kwargs)
+    if rfactor < 1.0:
+        downscaler, supersampler = supersampler, downscaler
 
-        aa = downscaler.scale(aa, func.work_clip.width, func.work_clip.height)
+    if callable(prefilter):
+        ss_clip = prefilter(func.work_clip)
+    elif isinstance(prefilter, vs.VideoNode):
+        FormatsMismatchError.check(based_aa, func.work_clip, prefilter)
 
-        if postfilter is None:
-            aa_out = MeanMode.MEDIAN(aa, func.work_clip, bilateral(aa))
-        elif callable(postfilter):
-            aa_out = postfilter(aa)
-        else:
-            aa_out = aa
+        if TYPE_CHECKING:
+            assert check_variable_format(prefilter, func.func)
 
-        if pskip:
-            no_aa = downscaler.scale(ss, func.work_clip.width, func.work_clip.height)
-            aa_out = norm_expr([func.work_clip, aa_out, aa, no_aa], "z a = x y ?", func=func.func)
+        ss_clip = prefilter
+    else:
+        ss_clip = func.work_clip
 
-        if mask:
-            aa_out = func.work_clip.std.MaskedMerge(aa_out, mask)
+    ss = supersampler.scale(ss_clip, aaw, aah)
 
-        return func.return_clip(aa_out)
+    if not antialiaser:
+        antialiaser = Eedi3(mclip=Bilinear.scale(mask, ss.width, ss.height) if mask else None, sclip_aa=True)
+        aa_kwargs = KwargsT(alpha=0.125, beta=0.25, vthresh0=12, vthresh1=24, field=1) | aa_kwargs
+
+    aa = getattr(antialiaser, 'draa' if double_rate else 'aa')(ss, **aa_kwargs)
+
+    aa = downscaler.scale(aa, func.work_clip.width, func.work_clip.height)
+
+    if pscale != 1.0:
+        no_aa = downscaler.scale(ss, func.work_clip.width, func.work_clip.height)
+        aa = norm_expr([func.work_clip, aa, no_aa], 'x z x - {pscale} * + y z - +', pscale=pscale, func=func.func)
+
+    if callable(postfilter):
+        aa = postfilter(aa)
+    elif postfilter is None:
+        aa = MeanMode.MEDIAN(aa, func.work_clip, bilateral(aa))
+
+    if mask:
+        aa = func.work_clip.std.MaskedMerge(aa, mask)
+
+    return func.return_clip(aa)

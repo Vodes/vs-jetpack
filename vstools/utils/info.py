@@ -6,8 +6,9 @@ from typing import Any, SupportsFloat, overload
 import vapoursynth as vs
 from jetpytools import fallback, mod_x
 
+from ..enums.other import Dar, Sar
 from ..exceptions import UnsupportedSubsamplingError
-from ..functions import depth, disallow_variable_format
+from ..functions import check_variable_format, depth
 from ..types import HoldsVideoFormatT, VideoFormatT
 
 __all__ = [
@@ -38,7 +39,6 @@ def get_var_infos(frame: vs.VideoNode | vs.VideoFrame) -> tuple[vs.VideoFormat, 
     return frame.format, frame.width, frame.height
 
 
-@disallow_variable_format
 def get_video_format(
     value: int | VideoFormatT | HoldsVideoFormatT, /, *, sample_type: int | vs.SampleType | None = None
 ) -> vs.VideoFormat:
@@ -50,8 +50,7 @@ def get_video_format(
         sample_type = vs.SampleType(sample_type)
 
     if isinstance(value, vs.VideoFormat):
-        # TODO: mypy bug
-        return value  # type: ignore[return-value]
+        return value
 
     if isinstance(value, VSPresetVideoFormat):
         return vs.core.get_video_format(value)
@@ -65,15 +64,13 @@ def get_video_format(
 
         return vs.core.query_video_format(vs.YUV, sample_type, value)
 
-    # TODO: mypy bug
-    assert value.format  # type: ignore[union-attr]
+    if isinstance(value, vs.VideoNode):
+        assert check_variable_format(value, get_video_format)
 
     if sample_type is not None:
-        # TODO: mypy bug
-        return value.format.replace(sample_type=sample_type)  # type: ignore[union-attr]
+        return value.format.replace(sample_type=sample_type)
 
-    # TODO: mypy bug
-    return value.format  # type: ignore[union-attr]
+    return value.format
 
 
 def get_depth(clip: VideoFormatT | HoldsVideoFormatT, /) -> int:
@@ -208,26 +205,43 @@ def get_w(height: float, ref: vs.VideoNode | vs.VideoFrame, /, mod: int | None =
     ...
 
 
+@overload
+def get_w(height: float, dar: Dar, /, mod: int | None = None) -> int:
+    ...
+
+
+@overload
+def get_w(height: float, sar: Sar, /, mod: int | None = None) -> int:
+    ...
+
+
 def get_w(
-    height: float, ar_or_ref: vs.VideoNode | vs.VideoFrame | SupportsFloat = 16 / 9, /, mod: int | None = None
+    height: float,
+    ar_or_ref: vs.VideoNode | vs.VideoFrame | SupportsFloat | Dar | Sar = 16 / 9,
+    /,
+    mod: int | None = None
 ) -> int:
     """
     Calculate the width given a height and an aspect ratio.
 
-    Either an aspect ratio (as a float) or a reference clip can be given.
+    Either an aspect ratio (as a float), a reference clip, or a Dar/Sar object can be given.
     A mod can also be set, which will ensure the output width is MOD#.
 
     The output is rounded by default (as fractional output resolutions are not supported anywhere).
 
     :param height:          Height to use for the calculation.
-    :param ar_or_ref:       Aspect ratio or reference clip from which the AR will be calculated.
+    :param ar_or_ref:       Aspect ratio, reference clip, or Dar/Sar object from which the AR will be calculated.
                             Default: 1.778 (16 / 9).
     :param mod:             Mod for the output width to comply to. If None, do not force it to comply to anything.
                             Default: None.
 
     :return:                Calculated width.
     """
-    if not isinstance(ar_or_ref, SupportsFloat):
+
+    if isinstance(ar_or_ref, (Dar, Sar)):
+        aspect_ratio = float(ar_or_ref)
+        mod = mod or 2
+    elif not isinstance(ar_or_ref, SupportsFloat):
         ref = ar_or_ref
         assert ref.format
         aspect_ratio = ref.width / ref.height
@@ -256,19 +270,32 @@ def get_h(width: float, ref: vs.VideoNode | vs.VideoFrame, /, mod: int | None = 
     ...
 
 
+@overload
+def get_h(width: float, dar: Dar, /, mod: int | None = None) -> int:
+    ...
+
+
+@overload
+def get_h(width: float, sar: Sar, /, mod: int | None = None) -> int:
+    ...
+
+
 def get_h(
-    width: float, ar_or_ref: vs.VideoNode | vs.VideoFrame | SupportsFloat = 16 / 9, /, mod: int | None = None
+    width: float,
+    ar_or_ref: vs.VideoNode | vs.VideoFrame | SupportsFloat | Dar | Sar = 16 / 9,
+    /,
+    mod: int | None = None
 ) -> int:
     """
     Calculate the height given a width and an aspect ratio.
 
-    Either an aspect ratio (as a float) or a reference clip can be given.
+    Either an aspect ratio (as a float), a reference clip, or a Dar/Sar object can be given.
     A mod can also be set, which will ensure the output height is MOD#.
 
     The output is rounded by default (as fractional output resolutions are not supported anywhere).
 
     :param width:           Width to use for the calculation.
-    :param ar_or_ref:       Aspect ratio or reference clip from which the AR will be calculated.
+    :param ar_or_ref:       Aspect ratio, reference clip, or Dar/Sar object from which the AR will be calculated.
                             Default: 1.778 (16 / 9).
     :param mod:             Mod for the output width to comply to. If None, do not force it to comply to anything.
                             Default: None.
@@ -276,7 +303,10 @@ def get_h(
     :return:                Calculated height.
     """
 
-    if not isinstance(ar_or_ref, SupportsFloat):
+    if isinstance(ar_or_ref, (Dar, Sar)):
+        aspect_ratio = 1.0 / float(ar_or_ref)
+        mod = mod or 2
+    elif not isinstance(ar_or_ref, SupportsFloat):
         ref = ar_or_ref
         assert ref.format
         aspect_ratio = ref.height / ref.width

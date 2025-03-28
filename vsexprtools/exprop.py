@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from itertools import cycle
 from math import isqrt
-from typing import Any, Iterable, Iterator, Literal, SupportsFloat, SupportsIndex, overload
+from typing import Any, Iterable, Iterator, Sequence, SupportsFloat, SupportsIndex, overload
 
 from vstools import (
-    ColorRange, ConvMode, CustomEnum, CustomIndexError, CustomValueError, FuncExceptT,
-    HoldsVideoFormatT, PlanesT, StrArrOpt, StrList, VideoFormatT, VideoNodeIterable,
-    flatten, flatten_vnodes, get_lowest_value, get_neutral_value, get_peak_value, vs
+    ColorRange, ConstantFormatVideoNode, ConvMode, CustomEnum, CustomIndexError, CustomValueError, FuncExceptT,
+    HoldsVideoFormatT, PlanesT, StrArrOpt, StrList, VideoFormatT, VideoNodeIterableT, VideoNodeT, flatten,
+    flatten_vnodes, get_lowest_value, get_neutral_value, get_peak_value, vs
 )
 
 from .util import ExprVarRangeT, ExprVars, ExprVarsT, complexpr_available
@@ -112,33 +112,34 @@ class ExprToken(ExprTokenBase, CustomEnum):
 
 class ExprList(StrList):
     def __call__(
-        self, *clips: VideoNodeIterable, planes: PlanesT = None,
+        self, *clips: VideoNodeIterableT[VideoNodeT], planes: PlanesT = None,
         format: HoldsVideoFormatT | VideoFormatT | None = None, opt: bool | None = None,
-        boundary: bool = True, force_akarin: Literal[False] | FuncExceptT = False,
-        func: FuncExceptT | None = None, split_planes: bool = False, **kwargs: Any
-    ) -> vs.VideoNode:
+        boundary: bool = True, func: FuncExceptT | None = None,
+        split_planes: bool = False, **kwargs: Any
+    ) -> VideoNodeT:
         from .funcs import norm_expr
 
         return norm_expr(
-            clips, self, planes, format, opt, boundary, force_akarin, func, split_planes, **kwargs  # type: ignore
+            flatten_vnodes(*clips), self, planes, format, opt, boundary, func, split_planes, **kwargs
         )
+
 
 class TupleExprList(tuple[ExprList, ...]):
     def __call__(
-        self, *clips: VideoNodeIterable, planes: PlanesT = None,
+        self, *clips: VideoNodeIterableT[VideoNodeT], planes: PlanesT = None,
         format: HoldsVideoFormatT | VideoFormatT | None = None, opt: bool | None = None,
-        boundary: bool = True, force_akarin: Literal[False] | FuncExceptT = False,
-        func: FuncExceptT | None = None, split_planes: bool = False, **kwargs: Any
-    ) -> vs.VideoNode:
-        clip: list[vs.VideoNode] | vs.VideoNode = flatten_vnodes(clips)
+        boundary: bool = True, func: FuncExceptT | None = None,
+        split_planes: bool = False, **kwargs: Any
+    ) -> VideoNodeT:
+        clip: Sequence[VideoNodeT] | VideoNodeT = flatten_vnodes(*clips)
 
         for exprlist in self:
             clip = exprlist(
                 clip, planes=planes, format=format, opt=opt, boundary=boundary,
-                force_akarin=force_akarin, func=func, split_planes=split_planes, **kwargs
+                func=func, split_planes=split_planes, **kwargs
             )
 
-        return clip[0] if isinstance(clip, list) else clip
+        return clip[0] if isinstance(clip, Sequence) else clip
 
     def __str__(self) -> str:
         return str(tuple(str(e) for e in self))
@@ -158,7 +159,7 @@ class ExprOpBase(str):
         self, *clips: vs.VideoNode | Iterable[vs.VideoNode | Iterable[vs.VideoNode]],
         suffix: StrArrOpt = None, prefix: StrArrOpt = None, expr_suffix: StrArrOpt = None,
         expr_prefix: StrArrOpt = None, planes: PlanesT = None, **expr_kwargs: Any
-    ) -> vs.VideoNode:
+    ) -> ConstantFormatVideoNode:
         from .funcs import combine
 
         return combine(clips, self, suffix, prefix, expr_suffix, expr_prefix, planes, **expr_kwargs)
@@ -209,11 +210,11 @@ class ExprOp(ExprOpBase, CustomEnum):
 
     @overload
     def __call__(
-        self, *clips: VideoNodeIterable, suffix: StrArrOpt = None,
+        self, *clips: VideoNodeIterableT[VideoNodeT], suffix: StrArrOpt = None,
         prefix: StrArrOpt = None, expr_suffix: StrArrOpt = None,
         expr_prefix: StrArrOpt = None, planes: PlanesT = None,
         **expr_kwargs: Any
-    ) -> vs.VideoNode:
+    ) -> VideoNodeT:
         """Call combine with this ExprOp."""
 
     @overload
@@ -221,7 +222,7 @@ class ExprOp(ExprOpBase, CustomEnum):
         """Format this ExprOp into an ExprOpBase str."""
 
     def __call__(self, *pos_args: Any, **kwargs: Any) -> vs.VideoNode | ExprOpBase:
-        args = list[Any](flatten(pos_args))
+        args = list(flatten(pos_args))
 
         if isinstance(args[0], vs.VideoNode):
             return self.combine(*args, **kwargs)
@@ -304,7 +305,7 @@ class ExprOp(ExprOpBase, CustomEnum):
         mode: ConvMode = ConvMode.HV, premultiply: float | int | None = None,
         multiply: float | int | None = None, clamp: bool = False
     ) -> TupleExprList:
-        convolution = list[float](flatten(matrix))  # type: ignore
+        convolution = list[float](flatten(matrix))
 
         if not (conv_len := len(convolution)) % 2:
             raise CustomValueError('Convolution length must be odd!', cls.convolution, matrix)

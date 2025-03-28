@@ -9,10 +9,11 @@ from dataclasses import dataclass
 from typing import Any, Literal, NamedTuple, final, overload
 
 from vstools import (
-    MISSING, ColorRange, ColorRangeT, Colorspace, ConstantFormatVideoNode, CustomIndexError, CustomRuntimeError,
-    CustomStrEnum, CustomValueError, FieldBased, FuncExceptT, FunctionUtil, KwargsT, Matrix, MatrixT, MissingT, PlanesT,
-    Self, SingleOrArr, check_variable, core, depth, get_video_format, get_y, is_gpu_available, join, normalize_seq, vs,
-    vs_object, UnsupportedFieldBasedError
+    MISSING, ColorRange, ColorRangeT, Colorspace, ConstantFormatVideoNode, CustomIndexError,
+    CustomRuntimeError, CustomStrEnum, CustomValueError, FuncExceptT, FunctionUtil,
+    KwargsT, Matrix, MatrixT, MissingT, PlanesT, SingleOrArr,
+    check_variable, core, depth, get_video_format, get_y, is_gpu_available, join, normalize_seq, vs,
+    vs_object, check_progressive
 )
 
 from .types import _Plugin_bm3dcpu_Core_Bound, _Plugin_bm3dcuda_Core_Bound, _Plugin_bm3dcuda_rtc_Core_Bound
@@ -335,7 +336,9 @@ class AbstractBM3D(vs_object):
                                 If not specified, gets the color from the "_ColorRange" prop of the clip.
                                 This check is not performed if the input clip is float.
         """
+
         assert check_variable(clip, self.__class__)
+        assert check_progressive(clip, self.__class__)
 
         self.sigma = self._Sigma(*normalize_seq(sigma, 3))
         self.tr = self._TemporalRadius(*normalize_seq(tr or 0, 2))
@@ -353,9 +356,6 @@ class AbstractBM3D(vs_object):
             colorspace = Colorspace.OPP_BM3D
 
         matrix = Matrix.from_param(matrix)
-
-        if (fb := FieldBased.from_video(clip, False, self.__class__)).is_inter:
-            raise UnsupportedFieldBasedError('Interlaced input is not supported!', self.__class__, fb)
 
         self.cspconfig = BM3DColorspaceConfig(colorspace, clip, matrix, self.sigma.y == 0, fp32)
 
@@ -405,7 +405,7 @@ class AbstractBM3D(vs_object):
     ) -> vs.VideoNode:
         func = FunctionUtil(clip, cls.denoise, planes)
 
-        sigma = func.norm_seq(sigma)
+        sigma = func.norm_seq(sigma, 0)
 
         ref = get_y(ref) if func.luma_only and ref else ref
 
@@ -490,11 +490,11 @@ class BM3DMawen(AbstractBM3D):
 
 class AbstractBM3DCudaMeta(ABCMeta):
     def __new__(
-        __mcls: type[Self], __name: str, __bases: tuple[type, ...], __namespace: dict[str, Any], **kwargs: Any
-    ) -> Self:
-        cls = super().__new__(__mcls, __name, __bases, __namespace)  # type: ignore
+        __mcls, __name: str, __bases: tuple[type, ...], __namespace: dict[str, Any], **kwargs: Any
+    ) -> AbstractBM3DCudaMeta:
+        cls = super().__new__(__mcls, __name, __bases, __namespace)
         cls.plugin = kwargs.get('plugin')
-        return cls  # type: ignore
+        return cls
 
 
 class AbstractBM3DCuda(AbstractBM3D, metaclass=AbstractBM3DCudaMeta):
